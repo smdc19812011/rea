@@ -33,6 +33,7 @@ data class UiState(
     val isBluetoothAvailable: Boolean = false,
     val isUsbHidAvailable: Boolean = false,
     val isUsbBridgeAvailable: Boolean = false,
+    val isShizukuAvailable: Boolean = false,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -75,6 +76,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             isBluetoothAvailable = m.bluetoothHid.isAvailable(),
             isUsbHidAvailable = m.usbHid.isAvailable(),
             isUsbBridgeAvailable = m.usbBridge.isAvailable(),
+            isShizukuAvailable = m.shizukuHid.isShizukuAvailable(),
         )}
     }
 

@@ -76,7 +76,12 @@ fun HomeScreen(viewModel: MainViewModel) {
         )
         CapabilityRow(
             icon = Icons.Default.Usb,
-            label = "USB Bridge (CH9329, no root)",
+            label = "USB via Shizuku (no root)",
+            available = uiState.isShizukuAvailable,
+        )
+        CapabilityRow(
+            icon = Icons.Default.Usb,
+            label = "USB Bridge (CH9329 dongle)",
             available = uiState.isUsbBridgeAvailable,
         )
         CapabilityRow(

@@ -4,6 +4,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.parcelize")
 }
 
+// Shizuku AIDL sources
+android.sourceSets["main"].aidl.srcDirs("src/main/aidl")
+
 android {
     namespace = "com.kvmcontrol.app"
     compileSdk = 34
@@ -32,7 +35,10 @@ android {
 
     kotlinOptions { jvmTarget = "17" }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        aidl = true
+    }
 
     composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
 
@@ -64,6 +70,10 @@ dependencies {
 
     // DataStore for settings persistence
     implementation("androidx.datastore:datastore-preferences:1.0.0")
+
+    // Shizuku — elevated privilege bridge (ADB or root, no permanent root needed)
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")

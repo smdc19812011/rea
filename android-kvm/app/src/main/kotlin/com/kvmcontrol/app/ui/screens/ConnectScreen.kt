@@ -146,7 +146,8 @@ private fun DeviceCard(
             Icon(
                 imageVector = when (device.type) {
                     ConnectionType.BLUETOOTH -> Icons.Default.Bluetooth
-                    ConnectionType.USB, ConnectionType.USB_BRIDGE -> Icons.Default.Usb
+                    ConnectionType.USB, ConnectionType.USB_BRIDGE,
+                    ConnectionType.SHIZUKU_USB -> Icons.Default.Usb
                     ConnectionType.NETWORK -> Icons.Default.Computer
                 },
                 contentDescription = null,
