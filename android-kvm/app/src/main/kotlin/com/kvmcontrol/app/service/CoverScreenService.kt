@@ -117,7 +117,7 @@ class KvmStatsPresentation(context: Context, display: Display) : Presentation(co
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
-        window?.setType(WindowManager.LayoutParams.TYPE_PRESENTATION)
+        // TYPE_PRESENTATION removed in API 26; Presentation manages its own window type
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
