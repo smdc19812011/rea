@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android KVM</string>
+    <string name="notification_channel_kvm">KVM Connection</string>
+    <string name="notification_title_connected">KVM Connected</string>
+    <string name="notification_title_connecting">Connecting to KVM…</string>
+    <string name="notification_text_connected">Controlling %1$s</string>
+    <string name="notification_channel_cover">Cover Screen</string>
+    <string name="label_home">Home</string>
+    <string name="label_connect">Connect</string>
+    <string name="label_control">Control</string>
+    <string name="label_settings">Settings</string>
+    <string name="btn_connect">Connect</string>
+    <string name="btn_disconnect">Disconnect</string>
+    <string name="btn_add_device">Add Device</string>
+    <string name="hint_host">Host / IP address</string>
+    <string name="hint_port">Port</string>
+    <string name="hint_password">Password (optional)</string>
+    <string name="hint_device_name">Device name</string>
+    <string name="label_cpu">CPU</string>
+    <string name="label_ram">RAM</string>
+    <string name="label_network">Network</string>
+    <string name="label_latency">Latency</string>
+    <string name="label_bluetooth">Bluetooth HID</string>
+    <string name="label_usb">USB HID</string>
+    <string name="label_network_kvm">Network KVM</string>
+    <string name="label_cover_screen">Cover Screen Stats</string>
+    <string name="permission_bluetooth_rationale">Bluetooth permission is needed to use the phone as a Bluetooth keyboard and mouse.</string>
+    <string name="permission_notification_rationale">Notification permission is needed to show connection status while KVM is active.</string>
+    <string name="error_bluetooth_unavailable">Bluetooth is not available on this device.</string>
+    <string name="error_hid_profile_unavailable">Bluetooth HID profile is not supported on this device.</string>
+    <string name="error_connection_failed">Connection failed: %1$s</string>
+    <string name="status_connected">Connected to %1$s</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="cover_screen_title">KVM Stats</string>
+</resources>

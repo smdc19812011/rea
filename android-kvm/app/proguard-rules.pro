@@ -1,0 +1,3 @@
+-keep class com.kvmcontrol.app.** { *; }
+-keepattributes *Annotation*
+-keepattributes SourceFile,LineNumberTable
