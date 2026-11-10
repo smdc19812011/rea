@@ -49,6 +49,13 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Auto-launch when a CH9329 HID bridge dongle is plugged in via OTG -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter"/>
         </activity>
 
         <!-- KVM Connection foreground service -->
@@ -63,7 +70,7 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice"/>
 
-        <!-- USB accessory filter -->
+        <!-- USB accessory filter (AOA accessories) -->
         <meta-data
             android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED"
             android:resource="@xml/accessory_filter"/>

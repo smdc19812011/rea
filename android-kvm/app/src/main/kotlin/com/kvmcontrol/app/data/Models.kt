@@ -3,7 +3,8 @@ package com.kvmcontrol.app.data
 import android.os.Parcelable
 import kotlinx.parcelize.Parcelize
 
-enum class ConnectionType { BLUETOOTH, USB, NETWORK }
+/** USB = root-required kernel gadget; USB_BRIDGE = rootless via CH9329 OTG dongle */
+enum class ConnectionType { BLUETOOTH, USB, USB_BRIDGE, NETWORK }
 enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 enum class TransportProtocol { VNC, SSH, CUSTOM }
 

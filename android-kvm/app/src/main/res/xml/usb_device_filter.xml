@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    USB device filter for HID bridge chips used in rootless USB KVM mode.
+
+    WCH CH9329 / CH9328:  VID=0x1A86  — most common USB-serial HID bridge
+    Arduino Leonardo:      VID=0x2341  — ATmega32u4 USB HID bridge
+    Raspberry Pi Pico:     VID=0x2E8A  — TinyUSB HID bridge firmware
+    Atmel ATMEGA32u4:      VID=0x03EB  — ProMicro / Teensy 2 HID bridge
+
+    When the user plugs the OTG dongle into the phone, Android will offer
+    to open the KVM Controller app automatically via USB_DEVICE_ATTACHED.
+-->
+<resources>
+    <!-- WCH CH9329 (most common KVM HID bridge) -->
+    <usb-device vendor-id="6790" />  <!-- 0x1A86 -->
+
+    <!-- Arduino Leonardo / Pro Micro -->
+    <usb-device vendor-id="9025" />  <!-- 0x2341 -->
+
+    <!-- Raspberry Pi Pico (TinyUSB HID bridge) -->
+    <usb-device vendor-id="11914" /> <!-- 0x2E8A -->
+
+    <!-- Atmel ATmega32u4 (Teensy 2, SparkFun ProMicro) -->
+    <usb-device vendor-id="1003" />  <!-- 0x03EB -->
+</resources>

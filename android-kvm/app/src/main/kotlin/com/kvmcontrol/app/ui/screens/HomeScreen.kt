@@ -76,6 +76,11 @@ fun HomeScreen(viewModel: MainViewModel) {
         )
         CapabilityRow(
             icon = Icons.Default.Usb,
+            label = "USB Bridge (CH9329, no root)",
+            available = uiState.isUsbBridgeAvailable,
+        )
+        CapabilityRow(
+            icon = Icons.Default.Usb,
             label = "USB HID (root required)",
             available = uiState.isUsbHidAvailable,
         )

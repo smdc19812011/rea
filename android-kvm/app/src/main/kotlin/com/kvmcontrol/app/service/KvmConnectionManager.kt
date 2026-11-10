@@ -26,6 +26,8 @@ class KvmConnectionManager(private val context: Context) {
 
     val bluetoothHid = BluetoothHidService(context)
     val usbHid = UsbHidService(context)
+    val usbBridge = UsbHidBridgeService(context)
+    val usbPermissionHelper = UsbPermissionHelper(context)
     val vncClient = VncClient()
     val statsCollector = StatsCollector(context)
 
@@ -46,9 +48,10 @@ class KvmConnectionManager(private val context: Context) {
             combine(
                 bluetoothHid.state,
                 usbHid.state,
+                usbBridge.state,
                 vncClient.state,
-            ) { bt, usb, vnc ->
-                listOf(bt, usb, vnc)
+            ) { bt, usb, usbBr, vnc ->
+                listOf(bt, usb, usbBr, vnc)
             }.collect { states ->
                 val combined = when {
                     states.any { it == ConnectionState.CONNECTED } -> ConnectionState.CONNECTED
@@ -86,6 +89,21 @@ class KvmConnectionManager(private val context: Context) {
                 val opened = usbHid.open()
                 if (!opened) _connectionState.value = ConnectionState.ERROR
             }
+            ConnectionType.USB_BRIDGE -> {
+                val dev = usbBridge.findBridgeDevice()
+                if (dev == null) {
+                    _connectionState.value = ConnectionState.ERROR
+                    return
+                }
+                usbPermissionHelper.requestPermission(dev) { granted ->
+                    if (granted) {
+                        val opened = usbBridge.open(dev)
+                        if (!opened) _connectionState.value = ConnectionState.ERROR
+                    } else {
+                        _connectionState.value = ConnectionState.ERROR
+                    }
+                }
+            }
             ConnectionType.NETWORK -> vncClient.connect(
                 host = config.device.address,
                 port = config.device.port,
@@ -100,6 +118,7 @@ class KvmConnectionManager(private val context: Context) {
             when (config.device.type) {
                 ConnectionType.BLUETOOTH -> bluetoothHid.unregister()
                 ConnectionType.USB -> usbHid.close()
+                ConnectionType.USB_BRIDGE -> usbBridge.close()
                 ConnectionType.NETWORK -> vncClient.disconnect()
             }
         }
@@ -117,6 +136,10 @@ class KvmConnectionManager(private val context: Context) {
                 usbHid.sendKeyEvent(event)
                 scope.launch { kotlinx.coroutines.delay(50); usbHid.sendKeyRelease() }
             }
+            ConnectionType.USB_BRIDGE -> {
+                usbBridge.sendKeyEvent(event)
+                scope.launch { kotlinx.coroutines.delay(50); usbBridge.sendKeyRelease() }
+            }
             ConnectionType.NETWORK -> {
                 for (key in event.keys) {
                     vncClient.sendKeyDown(key.toInt() and 0xFF)
@@ -130,8 +153,13 @@ class KvmConnectionManager(private val context: Context) {
         when (activeConfig?.device?.type) {
             ConnectionType.BLUETOOTH -> bluetoothHid.sendMouseEvent(event)
             ConnectionType.USB -> usbHid.sendMouseEvent(event)
+            ConnectionType.USB_BRIDGE -> usbBridge.sendMouseEvent(event)
             ConnectionType.NETWORK -> {} // VNC pointer sent separately with absolute coords
             null -> {}
         }
+    }
+
+    fun destroy() {
+        usbPermissionHelper.cleanup()
     }
 }

@@ -32,6 +32,7 @@ data class UiState(
     val isCoverScreenEnabled: Boolean = false,
     val isBluetoothAvailable: Boolean = false,
     val isUsbHidAvailable: Boolean = false,
+    val isUsbBridgeAvailable: Boolean = false,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -73,6 +74,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update { it.copy(
             isBluetoothAvailable = m.bluetoothHid.isAvailable(),
             isUsbHidAvailable = m.usbHid.isAvailable(),
+            isUsbBridgeAvailable = m.usbBridge.isAvailable(),
         )}
     }
 
