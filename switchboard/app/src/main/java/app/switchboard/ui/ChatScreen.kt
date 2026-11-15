@@ -133,7 +133,18 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
                     Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop)
+            // Remaining requests under the shared limits, refreshed every second; hidden when no limit is set.
+            val st = vm.settings
+            var usage by remember { mutableStateOf(vm.usage()) }
+            LaunchedEffect(st.maxPerMinute, st.maxPerDay, st.dailyReset, st.timeZone) { while (true) { usage = vm.usage(); kotlinx.coroutines.delay(1000) } }
+            val minLeft = (st.maxPerMinute - usage.lastMinute).coerceAtLeast(0)
+            val dayLeft = (st.maxPerDay - usage.today).coerceAtLeast(0)
+            val footer = listOfNotNull(
+                "$minLeft/${st.maxPerMinute} remaining min".takeIf { st.maxPerMinute > 0 },
+                "$dayLeft/${st.maxPerDay} remaining 24hr".takeIf { st.maxPerDay > 0 },
+            ).joinToString("   ").ifEmpty { null }
+            val exhausted = (st.maxPerMinute > 0 && minLeft == 0) || (st.maxPerDay > 0 && dayLeft == 0)
+            Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop, footer = footer, footerWarn = exhausted)
         }
     }
 }
@@ -258,10 +269,11 @@ private fun TypingDots() {
 }
 
 @Composable
-private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String) -> Unit, onStop: () -> Unit) {
+private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String) -> Unit, onStop: () -> Unit, footer: String? = null, footerWarn: Boolean = false) {
     var text by rememberSaveable { mutableStateOf("") }
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)) {
-        Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp), verticalAlignment = Alignment.Bottom) {
+      Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (footer != null) 4.dp else 12.dp), verticalAlignment = Alignment.Bottom) {
             TextField(
                 value = text, onValueChange = { text = it }, enabled = enabled,
                 placeholder = { Text("Message") }, maxLines = 6,
@@ -285,6 +297,13 @@ private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String) -> U
                 ) { Icon(Icons.Default.ArrowUpward, "Send") }
             }
         }
+        footer?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall,
+                color = if (footerWarn) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.End).padding(end = 16.dp, bottom = 8.dp)
+                    .semantics { contentDescription = "Requests remaining: $it" })
+        }
+      }
     }
 }
 

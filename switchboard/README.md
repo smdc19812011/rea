@@ -69,6 +69,7 @@ Android apps can't load kernel drivers, so USB-serial chips are driven from user
 ## Request limits and time zone
 - **Per minute / per day** (Settings, then Request limits; blank means no limit) are shared by all chats and saved on the device. Every model request counts, including each step of a tool run.
 - When a limit is hit, the request waits and is sent automatically when the window opens. A countdown shows above the message box, and Stop cancels it. The app has to stay open during a long daily wait.
+- Remaining requests show under the message box, lower right (for example `4/5 remaining min   96/100 remaining 24hr`). They turn red when a limit is used up, and are hidden when no limit is set.
 - The daily limit resets **at midnight** in your time zone, or on a **rolling 24 hours**.
 - **Time zone**: device default or any IANA zone. It's used for the midnight reset and to tell the model your local date and time.
 
