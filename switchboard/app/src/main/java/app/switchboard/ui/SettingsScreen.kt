@@ -14,6 +14,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -77,7 +79,7 @@ import java.util.UUID
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
+fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit, onOpen: (String) -> Unit = {}) {
     var editing by remember { mutableStateOf<Provider?>(null) }
     var confirmDelete by remember { mutableStateOf<Provider?>(null) }
     var presetMenu by remember { mutableStateOf(false) }
@@ -88,6 +90,19 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         TopAppBar(title = { Text("Settings") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } })
     }) { pad ->
         Column(Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val st = vm.settings
+            listOf(
+                Triple(Pages.CONNECTORS, "Connectors", "MCP servers, REST APIs, OAuth · ${st.connectors.size}"),
+                Triple(Pages.SKILLS, "Skills", "Reusable instructions · ${st.skills.size}"),
+                Triple(Pages.AGENTS, "Agents", "Assistants with their own prompt and model · ${st.agents.size}"),
+                Triple(Pages.PROJECTS, "Projects", "Chats with shared instructions and files · ${st.projects.size}"),
+                Triple(Pages.TASKS, "Scheduled tasks", "Prompts that run on their own · ${st.tasks.size}"),
+            ).forEach { (page, title, sub) ->
+                ListItem(headlineContent = { Text(title) }, supportingContent = { Text(sub) },
+                    trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
+                    modifier = Modifier.clickable { onOpen(page) })
+            }
+            HorizontalDivider()
             Text("Model providers", style = MaterialTheme.typography.titleMedium)
             Text("The selected provider answers new messages. You can switch mid-conversation; the full history is sent to whichever model is active.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

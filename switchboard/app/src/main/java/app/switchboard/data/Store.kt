@@ -20,6 +20,7 @@ class Store(context: Context) {
             providers = raw.providers.map { it.copy(apiKey = SecretBox.decrypt(it.apiKey)) },
             runnerToken = SecretBox.decrypt(raw.runnerToken),
             termuxToken = SecretBox.decrypt(raw.termuxToken),
+            connectors = raw.connectors.map { it.copy(auth = it.auth.mapSecrets(SecretBox::decrypt)) },
         )
     }
 
@@ -28,9 +29,16 @@ class Store(context: Context) {
             providers = s.providers.map { it.copy(apiKey = SecretBox.encrypt(it.apiKey)) },
             runnerToken = SecretBox.encrypt(s.runnerToken),
             termuxToken = SecretBox.encrypt(s.termuxToken),
+            connectors = s.connectors.map { it.copy(auth = it.auth.mapSecrets(SecretBox::encrypt)) },
         )
         atomicWrite(settingsFile, json.encodeToString(AppSettings.serializer(), enc))
     }
+
+    private fun AuthConfig.mapSecrets(f: (String) -> String) =
+        copy(token = f(token), password = f(password), oauth = oauth.copy(clientSecret = f(oauth.clientSecret)))
+
+    fun loadConversation(id: String): Conversation? =
+        runCatching { json.decodeFromString<Conversation>(File(dir, "$id.json").readText()) }.getOrNull()
 
     fun loadConversations(): List<Conversation> =
         dir.listFiles { f -> f.extension == "json" }.orEmpty()

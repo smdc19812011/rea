@@ -30,6 +30,22 @@ import app.switchboard.net.Termux
 import app.switchboard.net.ToolHost
 import app.switchboard.net.DeviceManager
 import app.switchboard.build.ApkBuilder
+import app.switchboard.data.Agent
+import app.switchboard.data.Connector
+import app.switchboard.data.Project
+import app.switchboard.data.ProjectFile
+import app.switchboard.data.Repeat
+import app.switchboard.data.ScheduledTask
+import app.switchboard.data.SecretBox
+import app.switchboard.data.Skill
+import app.switchboard.engine.AgentRunner
+import app.switchboard.engine.Extras
+import app.switchboard.engine.Scheduler
+import app.switchboard.engine.TaskRun
+import app.switchboard.engine.TaskRuns
+import app.switchboard.engine.finalText
+import app.switchboard.net.Connectors
+import app.switchboard.net.TokenStore
 import app.switchboard.net.ToolSpec
 import app.switchboard.data.RunnerMode
 import app.switchboard.data.DailyReset
@@ -92,16 +108,58 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val activeProvider: Provider?
         get() = settings.providers.firstOrNull { it.id == settings.activeProviderId } ?: settings.providers.firstOrNull()
 
+    private val tokens = TokenStore(File(app.filesDir, "tokens.enc"), SecretBox::encrypt, SecretBox::decrypt)
+    private val connectors = Connectors(tokens)
+    private val taskRuns = TaskRuns(File(app.filesDir, "task_runs.json"))
+
+    val currentAgent: Agent? get() = settings.agents.firstOrNull { it.id == current.agentId }
+
+    /** Provider for this chat: the chat's agent can pick its own provider and model. */
+    fun providerFor(agent: Agent?): Provider? {
+        val base = agent?.providerId?.let { id -> settings.providers.firstOrNull { it.id == id } } ?: activeProvider ?: return null
+        return if (!agent?.model.isNullOrBlank()) base.copy(model = agent!!.model) else base
+    }
+
     init {
         viewModelScope.launch {
             val (s, c) = withContext(Dispatchers.IO) { store.loadSettings() to store.loadConversations() }
             settings = s; conversations = c; loaded = true
+            Scheduler.sync(app, s)
         }
     }
 
     // --- conversations ---
 
-    fun newChat() { stop(); current = Conversation() }
+    fun newChat(projectId: String? = null) { stop(); current = Conversation(projectId = projectId) }
+
+    fun renameChat(id: String, title: String, projectId: String?) {
+        val t = title.trim().ifEmpty { "Untitled" }
+        val updated = (conversations.firstOrNull { it.id == id } ?: current.takeIf { it.id == id } ?: return).copy(title = t, projectId = projectId)
+        conversations = conversations.map { if (it.id == id) updated else it }
+        if (current.id == id) current = current.copy(title = t, projectId = projectId)
+        if (updated.messages.isNotEmpty()) io { store.save(updated) }
+    }
+
+    fun setChatAgent(agentId: String?) {
+        current = current.copy(agentId = agentId)
+        if (current.messages.isNotEmpty()) persistCurrent()
+    }
+
+    /** Picks up chats written by scheduled tasks while the app was in the background. */
+    fun reloadConversations() {
+        viewModelScope.launch {
+            val list = withContext(Dispatchers.IO) { store.loadConversations() }
+            conversations = list.map { c -> if (c.id == current.id && streaming) current else c }
+        }
+    }
+
+    fun openById(id: String) {
+        viewModelScope.launch {
+            val c = conversations.firstOrNull { it.id == id } ?: withContext(Dispatchers.IO) { store.loadConversation(id) } ?: return@launch
+            stop(); current = c
+            if (conversations.none { it.id == id }) conversations = listOf(c) + conversations
+        }
+    }
 
     fun open(id: String) { stop(); conversations.firstOrNull { it.id == id }?.let { current = it } }
 
@@ -112,7 +170,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun send(text: String) {
-        val provider = activeProvider ?: return
+        val provider = providerFor(currentAgent) ?: return
         val trimmed = text.trim()
         if (trimmed.isEmpty() || streaming) return
         val title = if (current.messages.isEmpty()) trimmed.lineSequence().first().take(48) else current.title
@@ -122,7 +180,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Re-run the last reply, optionally on whichever provider/model is active now. */
     fun regenerate() {
-        val provider = activeProvider ?: return
+        val provider = providerFor(currentAgent) ?: return
         if (streaming) return
         val msgs = current.messages
         val last = msgs.lastOrNull() ?: return
@@ -270,6 +328,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (call.name == Runner.SEND_FILE) return sendFile(call)
         // Building only writes inside Switchboard's storage; installing still goes through Android's own prompt.
         if (call.name == BUILD_APK) return buildApk(call)
+        if (call.name == Extras.USE_SKILL) return Extras.useSkill(argsOf(call), settings.skills)
+        if (call.name == Extras.RUN_AGENT) return runAgent(call)
         if (settings.askBeforeRun && current.id !in alwaysAllowed && call.name !in DeviceManager.noApproval) {
             val d = CompletableDeferred<Approval>()
             approvalDecision = d
@@ -282,6 +342,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         return when (call.name) {
+            Extras.CREATE_SKILL -> createSkill(argsOf(call))
+            Extras.CREATE_AGENT -> createAgent(argsOf(call))
+            Extras.SCHEDULE_TASK -> scheduleTaskFromChat(argsOf(call))
+            in connectorToolNames -> connectors.execute(call, settings.connectors, settings.unrestricted)
             Runner.INSTALL_APK -> installApk(call)
             in DeviceManager.names -> devices.execute(call, File(getApplication<Application>().filesDir, "workspace"), settings.unrestricted)
             else -> host().execute(call)
@@ -392,9 +456,42 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return ToolResult("Opened Android's installer for ${dest.name} (${dest.length() / 1024} KB). The user has to tap Install; you can't see whether they did.")
     }
 
-    private suspend fun buildOptions(): RequestOptions {
+    private val connectorToolNames = object : AbstractSet<String>() {
+        override val size get() = 0
+        override fun iterator(): Iterator<String> = emptyList<String>().iterator()
+        override fun contains(element: String) = connectors.owns(element)
+    }
+
+    private fun argsOf(call: ToolCall): JsonObject = runCatching { Json.parseToJsonElement(call.arguments).jsonObject }.getOrElse { JsonObject(emptyMap()) }
+
+    /**
+     * System prompt + tools for a request: settings prompt, the agent's prompt, project instructions/files, skills, agents,
+     * connectors, and (when Tools is on) the machine/device tools.
+     */
+    private suspend fun buildOptions(agent: Agent? = currentAgent, allowAgents: Boolean = true): RequestOptions {
         val base = requestOptions()
-        if (!settings.toolsEnabled) return base
+        val project = settings.projects.firstOrNull { it.id == current.projectId }
+        val sys = mutableListOf(base.system, agent?.systemPrompt.orEmpty(), Extras.projectNote(project))
+        val tools = mutableListOf<ToolSpec>()
+        val toolsAllowed = agent?.useTools != false
+        if (toolsAllowed && settings.toolsEnabled) {
+            val (note, specs) = machineTools()
+            sys += note; tools += specs
+            tools += listOf(Extras.createSkill, Extras.createAgent, Extras.scheduleTask)
+            sys += "You can also save skills (create_skill), create agents (create_agent) and schedule prompts to run later or on repeat (schedule_task) when the user asks."
+        }
+        if (toolsAllowed && settings.connectors.any { it.enabled }) {
+            val (specs, problems) = connectors.toolSpecs(settings.connectors)
+            tools += specs
+            if (specs.isNotEmpty()) sys += "Tools named mcp__* and api__* act on the user's connected services (Settings > Connectors)."
+            if (problems.isNotEmpty()) sys += "These connectors couldn't load right now: ${problems.joinToString("; ")}. Mention it if the user needs them."
+        }
+        if (settings.skills.any { it.enabled }) { tools += Extras.useSkill; sys += Extras.skillsNote(settings.skills) }
+        if (allowAgents && toolsAllowed && settings.agents.isNotEmpty()) { tools += Extras.runAgent; sys += Extras.agentsNote(settings.agents) }
+        return base.copy(system = sys.filter { it.isNotBlank() }.joinToString("\n\n"), tools = tools)
+    }
+
+    private suspend fun machineTools(): Pair<String, List<ToolSpec>> {
         val info = runCatching { describeHost() }.fold(
             { "Tools run on: $it." },
             { "The tool machine isn't reachable right now (${it.message}). If a tool fails, tell the user how to fix it in Settings > Tools." },
@@ -421,7 +518,152 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Do the work yourself with these tools instead of telling the user to run commands: install missing packages, create files, build, fix errors, and retry.
             Keep commands non-interactive. Builds can take several minutes; set timeout_sec accordingly.
         """.trimIndent()
-        return base.copy(system = listOf(base.system, toolNote).filter { it.isNotBlank() }.joinToString("\n\n"), tools = Runner.tools + DeviceManager.tools(includeDownload = settings.runnerMode == RunnerMode.PHONE) + listOfNotNull(BUILD_APK_SPEC.takeIf { settings.runnerMode == RunnerMode.PHONE }))
+        return toolNote to (Runner.tools + DeviceManager.tools(includeDownload = settings.runnerMode == RunnerMode.PHONE) + listOfNotNull(BUILD_APK_SPEC.takeIf { settings.runnerMode == RunnerMode.PHONE }))
+    }
+
+    // --- agents (run_agent) ---
+
+    private var agentDepth = 0
+
+    private suspend fun runAgent(call: ToolCall): ToolResult {
+        val a = argsOf(call)
+        val name = a.str("agent").orEmpty()
+        val agent = settings.agents.firstOrNull { it.name.equals(name, ignoreCase = true) }
+            ?: return ToolResult("No agent named '$name'. Available: ${settings.agents.joinToString { it.name }}", true)
+        if (agentDepth > 0) return ToolResult("Agents can't start other agents.", true)
+        val provider = providerFor(agent) ?: return ToolResult("No provider is set up.", true)
+        agentDepth++
+        val prevStatus = toolStatus
+        return try {
+            val opts = buildOptions(agent, allowAgents = false)
+            val added = AgentRunner(client) { awaitRateLimit() }.run(provider, opts,
+                listOf(ChatMessage(role = Role.USER, text = a.str("task").orEmpty())), execute = { runTool(it) }, maxSteps = 20,
+                onProgress = { toolStatus = "${agent.name}: $it" })
+            ToolResult("${agent.name} (${provider.model}) answered:\n${added.finalText()}", isError = added.lastOrNull()?.isError == true,
+                attachments = added.flatMap { it.attachments })
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
+        } catch (e: Exception) { ToolResult("${agent.name} failed: ${e.message}", true)
+        } finally { agentDepth--; toolStatus = prevStatus }
+    }
+
+    // --- skills / agents / tasks created from chat ---
+
+    private fun createSkill(a: JsonObject): ToolResult {
+        val name = a.str("name")?.trim().orEmpty(); val instr = a.str("instructions").orEmpty()
+        if (name.isEmpty() || instr.isBlank()) return ToolResult("name and instructions are required.", true)
+        val old = settings.skills.firstOrNull { it.name.equals(name, true) }
+        upsertSkill(Skill(id = old?.id ?: java.util.UUID.randomUUID().toString(), name = name, description = a.str("description").orEmpty(), instructions = instr))
+        return ToolResult("${if (old != null) "Updated" else "Saved"} skill \"$name\". It's in Settings > Skills.")
+    }
+
+    private fun createAgent(a: JsonObject): ToolResult {
+        val name = a.str("name")?.trim().orEmpty(); val prompt = a.str("system_prompt").orEmpty()
+        if (name.isEmpty() || prompt.isBlank()) return ToolResult("name and system_prompt are required.", true)
+        val old = settings.agents.firstOrNull { it.name.equals(name, true) }
+        upsertAgent(Agent(id = old?.id ?: java.util.UUID.randomUUID().toString(), name = name, description = a.str("description").orEmpty(),
+            systemPrompt = prompt, model = a.str("model").orEmpty(), providerId = old?.providerId))
+        return ToolResult("${if (old != null) "Updated" else "Created"} agent \"$name\". It's in Settings > Agents.")
+    }
+
+    private fun scheduleTaskFromChat(a: JsonObject): ToolResult {
+        val start = runCatching {
+            java.time.LocalDateTime.parse(a.str("start").orEmpty().trim(), DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")).atZone(zone).toInstant().toEpochMilli()
+        }.getOrElse { return ToolResult("start must look like 2026-11-16 08:30 (the user's local time).", true) }
+        val repeat = runCatching { Repeat.valueOf(a.str("repeat").orEmpty().uppercase()) }.getOrElse { return ToolResult("repeat must be once, hourly, daily or weekly.", true) }
+        val t = ScheduledTask(name = a.str("name").orEmpty().ifBlank { "Task" }, prompt = a.str("prompt").orEmpty(), repeat = repeat, startAt = start,
+            everyHours = a.str("every_hours")?.toIntOrNull() ?: 1, projectId = current.projectId, agentId = current.agentId,
+            allowTools = a.str("allow_tools") == "true")
+        if (t.prompt.isBlank()) return ToolResult("prompt is required.", true)
+        upsertTask(t)
+        return ToolResult("Scheduled \"${t.name}\" (${t.repeat.name.lowercase()}); next run ${nextRunText(t)}. It's in Settings > Scheduled tasks.")
+    }
+
+    // --- connectors ---
+
+    var oauthStatus by mutableStateOf<String?>(null); private set
+    private var pendingAuth: Connectors.PendingAuth? = null
+
+    fun upsertConnector(c: Connector) {
+        connectors.forget(c.id)
+        updateSettings { s -> s.copy(connectors = s.connectors.filterNot { it.id == c.id } + c) }
+    }
+    fun removeConnector(id: String) { connectors.forget(id); tokens.remove(id); updateSettings { s -> s.copy(connectors = s.connectors.filterNot { it.id == id }) } }
+    fun isSignedIn(id: String) = tokens.get(id) != null
+    fun signOut(id: String) { tokens.remove(id); connectors.forget(id); oauthStatus = "Signed out." }
+    suspend fun testConnector(c: Connector): Result<String> = runCatching { connectors.test(c) }
+
+    /** Discovers endpoints (and registers a client if needed), then opens the sign-in page in the browser. */
+    suspend fun connectOAuth(c: Connector): Result<Unit> = runCatching {
+        oauthStatus = "Preparing sign-in…"
+        val cfg = connectors.discover(c)
+        val updated = c.copy(auth = c.auth.copy(oauth = cfg))
+        if (updated != c) upsertConnector(updated)
+        val (url, pending) = connectors.beginAuth(updated, cfg)
+        pendingAuth = pending
+        getApplication<Application>().startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        oauthStatus = "Finish signing in in the browser…"
+    }.onFailure { oauthStatus = "Couldn't start sign-in: ${it.message}" }
+
+    /** switchboard://oauth?code=…&state=… */
+    fun onOAuthRedirect(uri: Uri) {
+        val p = pendingAuth ?: run { oauthStatus = "Sign-in response arrived, but no sign-in was in progress. Tap Connect again."; return }
+        val err = uri.getQueryParameter("error")
+        if (err != null) { oauthStatus = "Sign-in failed: ${uri.getQueryParameter("error_description") ?: err}"; pendingAuth = null; return }
+        if (uri.getQueryParameter("state") != p.state) { oauthStatus = "Sign-in failed: the response didn't match (state). Try again."; return }
+        val code = uri.getQueryParameter("code") ?: run { oauthStatus = "Sign-in failed: no code returned."; return }
+        pendingAuth = null
+        viewModelScope.launch {
+            oauthStatus = runCatching { connectors.finishAuth(p, code); "Signed in." }.getOrElse { "Sign-in failed: ${it.message}" }
+        }
+    }
+
+    // --- skills, agents, projects ---
+
+    fun upsertSkill(k: Skill) = updateSettings { s -> s.copy(skills = s.skills.filterNot { it.id == k.id } + k) }
+    fun removeSkill(id: String) = updateSettings { s -> s.copy(skills = s.skills.filterNot { it.id == id }) }
+    fun upsertAgent(a: Agent) = updateSettings { s -> s.copy(agents = s.agents.filterNot { it.id == a.id } + a) }
+    fun removeAgent(id: String) {
+        updateSettings { s -> s.copy(agents = s.agents.filterNot { it.id == id }) }
+        if (current.agentId == id) current = current.copy(agentId = null)
+    }
+
+    fun upsertProject(p: Project) = updateSettings { s -> s.copy(projects = s.projects.filterNot { it.id == p.id } + p) }
+    fun removeProject(id: String) {
+        updateSettings { s -> s.copy(projects = s.projects.filterNot { it.id == id }) }
+        conversations.filter { it.projectId == id }.forEach { renameChat(it.id, it.title, null) }
+        io { File(getApplication<Application>().filesDir, "projects/$id").deleteRecursively() }
+    }
+
+    /** Copies a picked file into the project's folder; its text is shared with every chat in the project. */
+    suspend fun addProjectFile(projectId: String, uri: Uri): Result<ProjectFile> = runCatching {
+        withContext(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            val name = ctx.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: "file"
+            val dest = File(ctx.filesDir, "projects/$projectId/${java.util.UUID.randomUUID().toString().take(6)}-$name")
+            dest.parentFile?.mkdirs()
+            ctx.contentResolver.openInputStream(uri)!!.use { input -> dest.outputStream().use { input.copyTo(it) } }
+            if (dest.length() > 5L * 1024 * 1024) { dest.delete(); error("Files over 5 MB can't be added to a project.") }
+            ProjectFile(name, dest.path, dest.length())
+        }
+    }
+
+    // --- scheduled tasks ---
+
+    fun upsertTask(t: ScheduledTask) {
+        updateSettings { s -> s.copy(tasks = s.tasks.filterNot { it.id == t.id } + t) }
+        Scheduler.sync(getApplication(), settings)
+    }
+    fun removeTask(id: String) {
+        Scheduler.cancel(getApplication(), id)
+        updateSettings { s -> s.copy(tasks = s.tasks.filterNot { it.id == id }) }
+    }
+    fun runTaskNow(id: String) = Scheduler.runNow(getApplication(), id)
+    fun taskRun(id: String): TaskRun? = taskRuns.all()[id]
+    fun nextRunText(t: ScheduledTask): String {
+        if (!t.enabled) return "paused"
+        val next = Scheduler.nextRun(t, zone, System.currentTimeMillis(), taskRun(t.id)?.at) ?: return "done"
+        return ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(next), zone).format(DateTimeFormatter.ofPattern("EEE MMM d, h:mm a"))
     }
 
     suspend fun testRunner(): Result<String> = runCatching { "Connected: " + host().describe() }
@@ -433,7 +675,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setAskBeforeRun(v: Boolean) = updateSettings { it.copy(askBeforeRun = v) }
     fun setRateLimits(perMinute: Int, perDay: Int) = updateSettings { it.copy(maxPerMinute = perMinute.coerceAtLeast(0), maxPerDay = perDay.coerceAtLeast(0)) }
     fun setDailyReset(v: DailyReset) = updateSettings { it.copy(dailyReset = v) }
-    fun setTimeZone(id: String) = updateSettings { it.copy(timeZone = id) }
+    fun setTimeZone(id: String) { updateSettings { it.copy(timeZone = id) }; Scheduler.sync(getApplication(), settings) }
 
     private fun updateReply(id: String, f: (ChatMessage) -> ChatMessage) {
         current = current.copy(messages = current.messages.map { if (it.id == id) f(it) else it })

@@ -13,8 +13,8 @@ android {
         applicationId = "app.switchboard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.9"
+        versionCode = 11
+        versionName = "1.10"
     }
 
     buildTypes {
@@ -46,5 +46,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.android.tools.build:apksig:8.7.3")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     testImplementation("junit:junit:4.13.2")
 }

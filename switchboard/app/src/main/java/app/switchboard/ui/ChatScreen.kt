@@ -103,7 +103,7 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
                         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.widthIn(max = 220.dp)) {
                             Text(provider?.model?.ifBlank { "No model set" } ?: "Switchboard",
                                 style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (provider != null) Text(provider.name + if (vm.settings.unrestricted) " · Unrestricted" else "",
+                            if (provider != null) Text((vm.currentAgent?.let { "${it.name} · " } ?: "") + provider.name + if (vm.settings.unrestricted) " · Unrestricted" else "",
                                 style = MaterialTheme.typography.labelSmall, maxLines = 1,
                                 color = if (vm.settings.unrestricted) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -125,6 +125,19 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
                     )
                     msgs.isEmpty() -> EmptyState("What's on your mind?", "Replies come from ${provider.name}. Tap the model name above to switch at any time.", null, null)
                     else -> MessageList(msgs, vm.streaming, vm.pendingApproval, onDecide = vm::decide, onRegenerate = vm::regenerate)
+                }
+            }
+            vm.pendingApproval?.takeIf { p -> vm.current.messages.none { m -> m.toolCalls.any { it.id == p.id } } }?.let { p ->
+                Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Text("Approve: ${toolTitle(p.name)}", style = MaterialTheme.typography.labelLarge)
+                        Text(Runner.describe(p), fontFamily = FontFamily.Monospace, fontSize = 12.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { vm.decide(ChatViewModel.Approval.ONCE) }) { Text("Approve") }
+                            OutlinedButton(onClick = { vm.decide(ChatViewModel.Approval.ALWAYS) }) { Text("Always") }
+                            TextButton(onClick = { vm.decide(ChatViewModel.Approval.DENY) }) { Text("Deny") }
+                        }
+                    }
                 }
             }
             vm.toolStatus?.let {
@@ -223,7 +236,12 @@ private fun toolTitle(name: String) = when (name) {
     Runner.INSTALL_APK -> "Install APK on this phone"
     Runner.SEND_FILE -> "Send file"
     ChatViewModel.BUILD_APK -> "Build Android app"
-    else -> name
+    "create_skill" -> "Save a skill"
+    "create_agent" -> "Create an agent"
+    "schedule_task" -> "Schedule a task"
+    "run_agent" -> "Ask an agent"
+    "use_skill" -> "Load a skill"
+    else -> if (name.startsWith("mcp__") || name.startsWith("api__")) "Connector: " + name.substringAfter("__").replace("__", " › ") else name
 }
 
 @Composable

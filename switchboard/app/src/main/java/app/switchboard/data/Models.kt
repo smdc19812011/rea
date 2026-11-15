@@ -57,6 +57,112 @@ data class Conversation(
     val title: String = "New chat",
     val messages: List<ChatMessage> = emptyList(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** Project this chat belongs to (shared instructions and files), if any. */
+    val projectId: String? = null,
+    /** Agent answering in this chat (its prompt and model), if any. */
+    val agentId: String? = null,
+)
+
+// ---------- connectors ----------
+
+@Serializable
+enum class AuthType { NONE, BEARER, HEADER, BASIC, OAUTH }
+
+/** OAuth 2.0 client settings. Tokens live separately in TokenStore so background jobs can refresh them safely. */
+@Serializable
+data class OAuthConfig(
+    val authUrl: String = "",
+    val tokenUrl: String = "",
+    val clientId: String = "",
+    /** Encrypted at rest. Leave empty for public clients (PKCE). */
+    val clientSecret: String = "",
+    val scopes: String = "",
+)
+
+@Serializable
+data class AuthConfig(
+    val type: AuthType = AuthType.NONE,
+    /** Bearer token or API key value; encrypted at rest. */
+    val token: String = "",
+    val headerName: String = "X-API-Key",
+    val username: String = "",
+    /** Encrypted at rest. */
+    val password: String = "",
+    val oauth: OAuthConfig = OAuthConfig(),
+)
+
+@Serializable
+enum class ConnectorKind { MCP, REST }
+
+@Serializable
+data class Connector(
+    val id: String = UUID.randomUUID().toString(),
+    val kind: ConnectorKind,
+    val name: String,
+    /** MCP endpoint (Streamable HTTP) or REST base URL. */
+    val url: String,
+    /** REST: what the API does, shown to the model. */
+    val description: String = "",
+    val auth: AuthConfig = AuthConfig(),
+    val enabled: Boolean = true,
+)
+
+// ---------- skills, agents, projects, scheduled tasks ----------
+
+/** Reusable instructions; the model sees name + description and loads the full text with use_skill. */
+@Serializable
+data class Skill(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val description: String,
+    val instructions: String,
+    val enabled: Boolean = true,
+)
+
+@Serializable
+data class Agent(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val description: String = "",
+    val systemPrompt: String,
+    /** Provider to use instead of the active one (null = active provider). */
+    val providerId: String? = null,
+    /** Model to use instead of the provider's model (blank = provider's). */
+    val model: String = "",
+    val useTools: Boolean = true,
+)
+
+@Serializable
+data class ProjectFile(val name: String, val path: String, val size: Long)
+
+@Serializable
+data class Project(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val instructions: String = "",
+    val files: List<ProjectFile> = emptyList(),
+)
+
+@Serializable
+enum class Repeat { ONCE, HOURLY, DAILY, WEEKLY }
+
+@Serializable
+data class ScheduledTask(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val prompt: String,
+    val repeat: Repeat = Repeat.DAILY,
+    /** First run (epoch ms); later runs keep this local time of day in the user's time zone. */
+    val startAt: Long,
+    /** For HOURLY: run every N hours. */
+    val everyHours: Int = 1,
+    val enabled: Boolean = true,
+    val projectId: String? = null,
+    val agentId: String? = null,
+    /** Let the run use tools and connectors without asking (nobody is there to approve). */
+    val allowTools: Boolean = false,
+    /** Append every run to one chat instead of starting a new chat each time. */
+    val sameChat: Boolean = false,
 )
 
 @Serializable
@@ -85,6 +191,11 @@ data class AppSettings(
     val dailyReset: DailyReset = DailyReset.MIDNIGHT,
     /** IANA zone ID like "Asia/Manila"; empty = follow the device. */
     val timeZone: String = "",
+    val connectors: List<Connector> = emptyList(),
+    val skills: List<Skill> = emptyList(),
+    val agents: List<Agent> = emptyList(),
+    val projects: List<Project> = emptyList(),
+    val tasks: List<ScheduledTask> = emptyList(),
 )
 
 /** Starting points offered in the "Add provider" dialog. Users can edit every field. */

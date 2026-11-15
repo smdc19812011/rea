@@ -72,6 +72,15 @@ These tools always run on the phone, because that's where the hardware is:
 Android asks for USB access per device and for Bluetooth permission the first time. Listing, reading and closing don't need approval; connecting, writing, HTTP and downloads follow "Ask before each action".
 Android apps can't load kernel drivers, so USB-serial chips are driven from user space, and other USB devices go through `usb_raw`. To install compilers, SDKs and other tools, use Termux or Computer mode (`pkg install`, `pip`, and so on). The phone sandbox can't run downloaded programs.
 
+## Connectors, skills, agents, projects and scheduled tasks
+Everything below is in **Settings**, at the top of the page.
+- **Connectors**: **MCP servers** (remote, Streamable HTTP; their tools appear as `mcp__<server>__<tool>`) and **REST APIs** (one `api__<name>` request tool each). Auth options are none, bearer token, API-key header, username and password, or **OAuth 2.0**: authorization code with PKCE, redirect `switchboard://oauth`, automatic endpoint discovery and client registration for MCP servers, and token refresh. Tokens are encrypted on the device. Connector calls follow "Ask before each action".
+- **Skills**: named instructions. The model sees each skill's name and description and loads the full text with `use_skill`. With Tools on, it can save new skills (`create_skill`).
+- **Agents**: a name, instructions, and optionally their own provider or model, with or without tools. Pick an agent for a chat in the model menu, or the model can hand a task to one with `run_agent`. With Tools on, it can create agents (`create_agent`).
+- **Projects**: group chats in the side menu, with shared instructions and reference files (their text is given to the model).
+- **Rename chats**: tap the pencil next to a chat in the side menu. You can move it into or out of a project there too.
+- **Scheduled tasks**: once, every N hours, daily or weekly, in your time zone, with an optional project and agent. Runs use Android's background job scheduler, so they work with the app closed. Each run is saved as a chat and you get a notification. Tools and connectors run without asking only if you turn on "Allow tools and connectors" for that task. With Tools on, the model can schedule tasks too (`schedule_task`).
+
 ## Request limits and time zone
 - **Per minute / per day** (Settings, then Request limits; blank means no limit) are shared by all chats and saved on the device. Every model request counts, including each step of a tool run.
 - When a limit is hit, the request waits and is sent automatically when the window opens. A countdown shows above the message box, and Stop cancels it. The app has to stay open during a long daily wait.

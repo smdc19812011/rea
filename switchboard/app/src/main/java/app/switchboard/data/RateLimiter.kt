@@ -21,13 +21,17 @@ class RateLimiter(private val file: File?, private val clock: () -> Long = Syste
 
     private val times = ArrayDeque<Long>()
 
-    init {
-        file?.takeIf { it.exists() }?.readText()?.split(',')?.mapNotNull { it.trim().toLongOrNull() }?.sorted()?.let(times::addAll)
+    init { reload() }
+
+    private fun reload() {
+        val saved = file?.takeIf { it.exists() }?.readText()?.split(',')?.mapNotNull { it.trim().toLongOrNull() } ?: return
+        times.clear(); times.addAll(saved.sorted())
     }
 
     /** Records a request and returns null if it may go now; otherwise returns how long to wait (nothing recorded). */
     @Synchronized
     fun tryAcquire(l: Limits): Wait? {
+        reload() // chats and background tasks share the file
         val now = clock()
         prune(now)
         val dayStart = dayWindowStart(now, l)
@@ -52,6 +56,7 @@ class RateLimiter(private val file: File?, private val clock: () -> Long = Syste
 
     @Synchronized
     fun usage(l: Limits): Usage {
+        reload()
         val now = clock()
         val dayStart = dayWindowStart(now, l)
         return Usage(times.count { it > now - MINUTE_MS }, times.count { it >= dayStart })

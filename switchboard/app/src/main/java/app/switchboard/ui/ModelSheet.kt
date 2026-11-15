@@ -60,6 +60,14 @@ fun ModelSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
                     FilterChip(selected = p.id == provider.id, onClick = { vm.selectProvider(p.id) }, label = { Text(p.name) })
                 }
             }
+            if (vm.settings.agents.isNotEmpty()) {
+                Spacer(Modifier.size(12.dp))
+                Text("Agent for this chat", style = MaterialTheme.typography.titleSmall)
+                androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = vm.current.agentId == null, onClick = { vm.setChatAgent(null) }, label = { Text("None") })
+                    vm.settings.agents.forEach { a -> FilterChip(selected = vm.current.agentId == a.id, onClick = { vm.setChatAgent(a.id) }, label = { Text(a.name) }) }
+                }
+            }
             Spacer(Modifier.size(12.dp))
             Text("Model", style = MaterialTheme.typography.titleSmall)
             OutlinedTextField(
