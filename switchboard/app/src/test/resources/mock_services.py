@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
 BASE = f"http://127.0.0.1:{PORT}"
+PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 STATS = {"refreshes": 0, "token_calls": 0, "chat_calls": 0}
 
 class H(BaseHTTPRequestHandler):
@@ -65,9 +66,15 @@ class H(BaseHTTPRequestHandler):
                 text = msg["params"]["arguments"].get("text", "")
                 return self.send(200, {"jsonrpc": "2.0", "id": msg["id"], "result": {"content": [{"type": "text", "text": "echo: " + text}], "isError": False}})
             return self.send(200, {"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32601, "message": "unknown method"}})
+        if u.path == "/v1/images/generations":
+            req = json.loads(raw); assert req["prompt"] and req["model"] == "img-model"
+            return self.send(200, {"data": [{"b64_json": PNG}]})
         if u.path == "/v1/chat/completions":  # one tool call, then a final answer once the tool result is in the history
             STATS["chat_calls"] += 1
             req = json.loads(raw)
+            if req.get("modalities") == ["image", "text"]:
+                return self.send(200, {"choices": [{"message": {"role": "assistant", "content": "Here you go",
+                    "images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64," + PNG}}]}}]})
             if any(m["role"] == "tool" for m in req["messages"]):
                 result = [m for m in req["messages"] if m["role"] == "tool"][-1]["content"]
                 chunks = [{"choices": [{"delta": {"content": "Done: " + result}, "finish_reason": "stop"}]}]

@@ -11,6 +11,7 @@ Anything the model runs here has the same permissions as the user who started th
 Stop it with Ctrl+C when you're done.
 """
 import argparse
+import base64
 import json
 import os
 import platform
@@ -142,7 +143,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/write":
                 target = resolve(req.get("path"))
                 os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-                data = (req.get("content") or "").encode()
+                raw = req.get("content") or ""
+                data = base64.b64decode(raw) if req.get("encoding") == "base64" else raw.encode()
                 with open(target, "wb") as f:
                     f.write(data)
                 return self._send(200, {"ok": True, "path": target, "bytes": len(data)})

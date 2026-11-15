@@ -40,6 +40,11 @@ import app.switchboard.data.SecretBox
 import app.switchboard.data.Skill
 import app.switchboard.engine.AgentRunner
 import app.switchboard.engine.Extras
+import app.switchboard.engine.FileTools
+import app.switchboard.build.DocMaker
+import app.switchboard.build.PdfMaker
+import app.switchboard.net.ImageGen
+import app.switchboard.data.ApiKind
 import app.switchboard.engine.Scheduler
 import app.switchboard.engine.TaskRun
 import app.switchboard.engine.TaskRuns
@@ -286,7 +291,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         data class Retry(val reason: String) : TurnOutcome
     }
 
-    private suspend fun attemptTurn(provider: Provider, opts: RequestOptions, finalAttempt: Boolean): TurnOutcome {
+    /** Models that answered "tools not supported"; they get plain requests from then on (until the app restarts). */
+    private val noToolModels = mutableSetOf<String>()
+
+    private suspend fun attemptTurn(provider: Provider, opts0: RequestOptions, finalAttempt: Boolean): TurnOutcome {
+        val opts = if (provider.model in noToolModels && opts0.tools.isNotEmpty())
+            opts0.copy(tools = emptyList(), system = opts0.system + "\n\nTools aren't available with this model, so answer directly.") else opts0
         awaitRateLimit()
         val history = current.messages
         val reply = ChatMessage(role = Role.ASSISTANT, text = "", source = "${provider.name} · ${provider.model}")
@@ -299,7 +309,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     is StreamEvent.TextDelta -> { buf.append(ev.text); updateReply(reply.id) { it.copy(text = buf.toString()) } }
                     is StreamEvent.TurnEnd -> {
                         calls = ev.toolCalls
-                        updateReply(reply.id) { it.copy(text = ev.text, toolCalls = ev.toolCalls, anthropicBlocks = ev.anthropicBlocks) }
+                        val pics = ev.images.mapIndexedNotNull { i, url ->
+                            runCatching { ImageGen.decodeDataUrl(url) }.getOrNull()?.let { f -> saveAttachment(f.bytes, "image-${System.currentTimeMillis() / 1000}-${i + 1}.${f.extension}", f.mime) }
+                        }
+                        updateReply(reply.id) { it.copy(text = ev.text, toolCalls = ev.toolCalls, anthropicBlocks = ev.anthropicBlocks, attachments = it.attachments + pics) }
                     }
                 }
             }
@@ -310,6 +323,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             throw e
         } catch (e: Exception) {
             val msg = e.message ?: e.javaClass.simpleName
+            if (opts.tools.isNotEmpty() && e is app.switchboard.net.ApiException && e.httpCode in setOf(400, 404, 422) && Regex("(?i)tool|function").containsMatchIn(msg)) {
+                noToolModels += provider.model
+                current = current.copy(messages = current.messages.filterNot { it.id == reply.id })
+                return TurnOutcome.Retry("${provider.model} doesn't support tools; continuing without them")
+            }
             if (!finalAttempt && isRetryable(e)) {
                 // Drop the partial reply; the whole turn is requested again.
                 current = current.copy(messages = current.messages.filterNot { it.id == reply.id })
@@ -329,6 +347,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // Building only writes inside Switchboard's storage; installing still goes through Android's own prompt.
         if (call.name == BUILD_APK) return buildApk(call)
         if (call.name == Extras.USE_SKILL) return Extras.useSkill(argsOf(call), settings.skills)
+        when (call.name) {
+            FileTools.GENERATE_IMAGE -> return generateImage(argsOf(call))
+            FileTools.CREATE_DOCUMENT -> return createDocument(argsOf(call))
+            FileTools.TEXT_TO_SPEECH -> return textToSpeech(argsOf(call))
+        }
         if (call.name == Extras.RUN_AGENT) return runAgent(call)
         if (settings.askBeforeRun && current.id !in alwaysAllowed && call.name !in DeviceManager.noApproval) {
             val d = CompletableDeferred<Approval>()
@@ -487,6 +510,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (problems.isNotEmpty()) sys += "These connectors couldn't load right now: ${problems.joinToString("; ")}. Mention it if the user needs them."
         }
         if (settings.skills.any { it.enabled }) { tools += Extras.useSkill; sys += Extras.skillsNote(settings.skills) }
+        if (toolsAllowed && settings.fileTools) {
+            tools += listOf(FileTools.createDocument, FileTools.textToSpeech)
+            val img = imageProvider()
+            if (img != null) tools += FileTools.generateImage
+            sys += "You can make files for the user: create_document (PDF, Word, Excel, ZIP, or any text format), text_to_speech (audio)" +
+                (if (img != null) ", and generate_image (pictures via ${img.name})" else "") +
+                ". Files appear in the chat with Open/Save/Share buttons. Use these instead of saying you can't create a file."
+        }
         if (allowAgents && toolsAllowed && settings.agents.isNotEmpty()) { tools += Extras.runAgent; sys += Extras.agentsNote(settings.agents) }
         return base.copy(system = sys.filter { it.isNotBlank() }.joinToString("\n\n"), tools = tools)
     }
@@ -520,6 +551,110 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         """.trimIndent()
         return toolNote to (Runner.tools + DeviceManager.tools(includeDownload = settings.runnerMode == RunnerMode.PHONE) + listOfNotNull(BUILD_APK_SPEC.takeIf { settings.runnerMode == RunnerMode.PHONE }))
     }
+
+    // --- file generation ---
+
+    /** Saves bytes as a chat attachment (and a copy in the workspace so tools can use it). */
+    private fun saveAttachment(bytes: ByteArray, name: String, mime: String): Attachment {
+        val ctx = getApplication<Application>()
+        val safe = name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_").take(120).ifBlank { "file" }
+        val dest = File(attachmentsDir(current.id), "${java.util.UUID.randomUUID().toString().take(8)}-$safe")
+        dest.parentFile?.mkdirs(); dest.writeBytes(bytes)
+        runCatching { File(ctx.filesDir, "workspace/files/$safe").apply { parentFile?.mkdirs(); writeBytes(bytes) } }
+        return Attachment(safe, dest.path, bytes.size.toLong(), mime)
+    }
+
+    /** Image provider: the one chosen in Settings > File generation, else the active provider if it can make images. */
+    private fun imageProvider(): Provider? {
+        val p = settings.imageGen.providerId?.let { id -> settings.providers.firstOrNull { it.id == id } } ?: activeProvider ?: return null
+        return p.takeIf { it.kind == ApiKind.OPENAI_COMPATIBLE }
+    }
+
+    private suspend fun generateImage(a: JsonObject): ToolResult {
+        val p = imageProvider() ?: return ToolResult("No image-capable provider. Ask the user to choose one in Settings > File generation (OpenRouter or OpenAI work).", true)
+        val prompt = a.str("prompt")?.takeIf { it.isNotBlank() } ?: return ToolResult("Missing 'prompt'.", true)
+        val cfg = settings.imageGen
+        val prev = toolStatus
+        toolStatus = "Generating image with ${cfg.model.ifBlank { ImageGen.defaultModel(p) }}…"
+        return try {
+            awaitRateLimit()
+            val (files, note) = ImageGen().generate(p, cfg.model, cfg.method, prompt, cfg.size, settings.unrestricted)
+            val base = a.str("filename")?.substringBeforeLast('.')?.ifBlank { null } ?: "image-${System.currentTimeMillis() / 1000}"
+            val atts = withContext(Dispatchers.IO) { files.mapIndexed { i, f -> saveAttachment(f.bytes, "$base${if (files.size > 1) "-${i + 1}" else ""}.${f.extension}", f.mime) } }
+            ToolResult("Created ${atts.size} image(s) (${atts.joinToString { it.name }}); they're shown in the chat.${if (note.isNotBlank()) " Model note: ${note.take(300)}" else ""}", attachments = atts)
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
+        } catch (e: Exception) { ToolResult(e.message ?: "Image generation failed.", true)
+        } finally { toolStatus = prev }
+    }
+
+    private suspend fun createDocument(a: JsonObject): ToolResult = withContext(Dispatchers.IO) {
+        val format = a.str("format")?.lowercase()?.trimStart('.') ?: return@withContext ToolResult("Missing 'format'.", true)
+        val name = (a.str("filename")?.trim()?.ifBlank { null } ?: "document").let { if (it.lowercase().endsWith(".$format")) it else "$it.$format" }
+        val content = a.str("content").orEmpty()
+        runCatching {
+            val bytes = when (format) {
+                "pdf" -> PdfMaker.pdf(content, a.str("title"))
+                "docx" -> DocMaker.docx(content, a.str("title"))
+                "xlsx" -> {
+                    val sheets = (a["sheets"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { el ->
+                        val o = el as? JsonObject ?: return@mapNotNull null
+                        (o.str("name") ?: "Sheet") to DocMaker.parseCsv(o.str("csv").orEmpty())
+                    }?.takeIf { it.isNotEmpty() } ?: listOf("Sheet1" to DocMaker.parseCsv(content))
+                    DocMaker.xlsx(sheets)
+                }
+                "zip" -> {
+                    val ws = File(getApplication<Application>().filesDir, "workspace")
+                    val files = (a["files"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }.orEmpty()
+                    require(files.isNotEmpty()) { "List the workspace files to include in 'files'." }
+                    DocMaker.zipFiles(ws, files.map { if (it.startsWith("/")) File(it) else File(ws, it) })
+                }
+                else -> content.toByteArray()
+            }
+            val mime = when (format) {
+                "pdf" -> "application/pdf"; "zip" -> "application/zip"
+                "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(format) ?: "text/plain"
+            }
+            val att = saveAttachment(bytes, name, mime)
+            ToolResult("Created ${att.name} (${bytes.size} bytes); it's attached in the chat.", attachments = listOf(att))
+        }.getOrElse { ToolResult("Couldn't create $name: ${it.message}", true) }
+    }
+
+    /** Speaks [text] into a WAV file with the phone's text-to-speech engine. */
+    private suspend fun textToSpeech(a: JsonObject): ToolResult {
+        val text = a.str("text")?.takeIf { it.isNotBlank() } ?: return ToolResult("Missing 'text'.", true)
+        val ctx = getApplication<Application>()
+        val out = File(ctx.cacheDir, "tts-${System.currentTimeMillis()}.wav")
+        val ok = withContext(Dispatchers.Main) {
+            kotlinx.coroutines.withTimeoutOrNull(120_000) {
+                val ready = CompletableDeferred<android.speech.tts.TextToSpeech?>()
+                lateinit var tts: android.speech.tts.TextToSpeech
+                tts = android.speech.tts.TextToSpeech(ctx) { status -> ready.complete(if (status == android.speech.tts.TextToSpeech.SUCCESS) tts else null) }
+                val engine = ready.await() ?: return@withTimeoutOrNull "The phone has no working text-to-speech engine."
+                try {
+                    a.str("language")?.let { engine.language = java.util.Locale.forLanguageTag(it) }
+                    if (text.length > android.speech.tts.TextToSpeech.getMaxSpeechInputLength()) return@withTimeoutOrNull "Text is too long for one file (max ${android.speech.tts.TextToSpeech.getMaxSpeechInputLength()} characters); split it."
+                    val done = CompletableDeferred<Boolean>()
+                    engine.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                        override fun onStart(id: String?) {}
+                        override fun onDone(id: String?) { done.complete(true) }
+                        @Deprecated("old API") override fun onError(id: String?) { done.complete(false) }
+                        override fun onError(id: String?, code: Int) { done.complete(false) }
+                    })
+                    if (engine.synthesizeToFile(text, null, out, "sb") != android.speech.tts.TextToSpeech.SUCCESS) return@withTimeoutOrNull "Text-to-speech refused the request."
+                    if (done.await()) null else "Text-to-speech failed."
+                } finally { engine.shutdown() }
+            } ?: "Text-to-speech timed out."
+        }
+        if (ok != null || !out.isFile || out.length() == 0L) { out.delete(); return ToolResult(ok ?: "No audio was produced.", true) }
+        val name = (a.str("filename")?.substringBeforeLast('.')?.ifBlank { null } ?: "speech") + ".wav"
+        val att = withContext(Dispatchers.IO) { saveAttachment(out.readBytes(), name, "audio/wav").also { out.delete() } }
+        return ToolResult("Created ${att.name} (${att.size / 1024} KB of audio); it's attached in the chat.", attachments = listOf(att))
+    }
+
+    fun setFileTools(v: Boolean) = updateSettings { it.copy(fileTools = v) }
+    fun setImageGen(c: app.switchboard.data.ImageGenConfig) = updateSettings { it.copy(imageGen = c) }
 
     // --- agents (run_agent) ---
 

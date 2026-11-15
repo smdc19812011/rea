@@ -22,6 +22,20 @@ data class Provider(
 @Serializable
 enum class RunnerMode { PHONE, TERMUX, REMOTE }
 
+/** How images are requested: chat completions with image output (OpenRouter) or the /images/generations API (OpenAI-style). */
+@Serializable
+enum class ImageMethod { AUTO, CHAT, IMAGES_API }
+
+@Serializable
+data class ImageGenConfig(
+    /** null = the active provider. */
+    val providerId: String? = null,
+    /** Blank = a sensible default for the provider. */
+    val model: String = "",
+    val method: ImageMethod = ImageMethod.AUTO,
+    val size: String = "1024x1024",
+)
+
 @Serializable
 enum class Role { USER, ASSISTANT, TOOL }
 
@@ -196,6 +210,9 @@ data class AppSettings(
     val agents: List<Agent> = emptyList(),
     val projects: List<Project> = emptyList(),
     val tasks: List<ScheduledTask> = emptyList(),
+    /** Offer generate_image, create_document and text_to_speech to the model. */
+    val fileTools: Boolean = true,
+    val imageGen: ImageGenConfig = ImageGenConfig(),
 )
 
 /** Starting points offered in the "Add provider" dialog. Users can edit every field. */

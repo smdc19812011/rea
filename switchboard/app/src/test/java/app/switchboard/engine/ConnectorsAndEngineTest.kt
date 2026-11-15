@@ -130,4 +130,14 @@ class ConnectorsAndEngineTest {
         val note = Extras.projectNote(Project(name = "Launch", instructions = "Be brief.", files = listOf(ProjectFile("notes.txt", f.path, f.length()))))
         assertTrue(note, note.contains("project \"Launch\"") && note.contains("Be brief.") && note.contains("--- Project file: notes.txt ---\nBudget is 5k."))
     }
+
+    @Test fun imageGenerationBothMethods() = runBlocking {
+        val p = Provider(name = "Mock", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = "$base/v1", model = "chat")
+        val png = byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte())
+        val (viaChat, text) = app.switchboard.net.ImageGen().generate(p, "img-model", app.switchboard.data.ImageMethod.CHAT, "a dragon", "", false)
+        assertEquals("Here you go", text)
+        assertTrue(viaChat.single().bytes.copyOf(4).contentEquals(png) && viaChat.single().mime == "image/png")
+        val (viaApi, _) = app.switchboard.net.ImageGen().generate(p, "img-model", app.switchboard.data.ImageMethod.IMAGES_API, "a dragon", "1024x1024", false)
+        assertTrue(viaApi.single().bytes.copyOf(4).contentEquals(png))
+    }
 }

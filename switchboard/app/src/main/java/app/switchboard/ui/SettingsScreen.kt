@@ -159,6 +159,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit, onOpen: (String) -> Un
                     minLines = 3, modifier = Modifier.fillMaxWidth())
             }
             Spacer(Modifier.size(16.dp))
+            FileGenSection(vm)
+            Spacer(Modifier.size(16.dp))
             LimitsSection(vm)
             Spacer(Modifier.size(16.dp))
             ToolsSection(vm)
@@ -409,4 +411,50 @@ private fun ZoneRow(label: String, selected: Boolean, onClick: () -> Unit) {
         RadioButton(selected = selected, onClick = onClick)
         Text(label, style = MaterialTheme.typography.bodyMedium)
     }
+}
+
+
+@Composable
+private fun FileGenSection(vm: ChatViewModel) {
+    val s = vm.settings
+    val cfg = s.imageGen
+    val scope = rememberCoroutineScope()
+    FRow(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("File generation", style = MaterialTheme.typography.titleMedium)
+            Text("Lets the model create images, PDF, Word, Excel, ZIP, audio and text files, delivered in the chat.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = s.fileTools, onCheckedChange = vm::setFileTools)
+    }
+    if (!s.fileTools) return
+    Text("Images are made by an image model, even when you chat with a text-only model. OpenRouter and OpenAI work; Anthropic doesn't make images.",
+        style = MaterialTheme.typography.bodySmall)
+    val compatible = s.providers.filter { it.kind == app.switchboard.data.ApiKind.OPENAI_COMPATIBLE }
+    Picker("Image provider", listOf<Pair<String?, String>>(null to "Active provider") + compatible.map { it.id to it.name }, cfg.providerId) { vm.setImageGen(cfg.copy(providerId = it)) }
+    val provider = cfg.providerId?.let { id -> s.providers.firstOrNull { it.id == id } } ?: vm.activeProvider
+    var model by remember { mutableStateOf(cfg.model) }
+    OutlinedTextField(model, { model = it.trim(); vm.setImageGen(cfg.copy(model = model)) }, label = { Text("Image model") }, singleLine = true,
+        placeholder = { Text(provider?.let { app.switchboard.net.ImageGen.defaultModel(it) }.orEmpty().ifBlank { "model ID" }) },
+        modifier = Modifier.fillMaxWidth())
+    var found by remember { mutableStateOf<List<String>?>(null) }
+    var note by remember { mutableStateOf<String?>(null) }
+    OutlinedButton(enabled = provider != null, onClick = {
+        note = "Loading…"
+        scope.launch {
+            vm.fetchModels(provider!!).onSuccess { all -> found = all.filter { m -> listOf("image", "dall", "flux", "imagen", "diffusion", "sdxl").any { it in m.lowercase() } }; note = null }
+                .onFailure { note = "Couldn't load models: ${it.message}" }
+        }
+    }) { Text("Find image models") }
+    note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    found?.let { list ->
+        if (list.isEmpty()) Text("No image models found on this provider.", style = MaterialTheme.typography.bodySmall)
+        list.take(30).forEach { id ->
+            Text(id, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth().clickable { model = id; vm.setImageGen(cfg.copy(model = id)); found = null }.padding(vertical = 8.dp))
+        }
+    }
+    Picker("Request type", listOf(app.switchboard.data.ImageMethod.AUTO to "Automatic", app.switchboard.data.ImageMethod.CHAT to "Chat with image output (OpenRouter)",
+        app.switchboard.data.ImageMethod.IMAGES_API to "Images API (OpenAI-style)"), cfg.method) { vm.setImageGen(cfg.copy(method = it)) }
+    var size by remember { mutableStateOf(cfg.size) }
+    OutlinedTextField(size, { size = it.trim(); vm.setImageGen(cfg.copy(size = size)) }, label = { Text("Size (Images API)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 }

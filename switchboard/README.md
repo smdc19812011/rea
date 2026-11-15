@@ -72,6 +72,14 @@ These tools always run on the phone, because that's where the hardware is:
 Android asks for USB access per device and for Bluetooth permission the first time. Listing, reading and closing don't need approval; connecting, writing, HTTP and downloads follow "Ask before each action".
 Android apps can't load kernel drivers, so USB-serial chips are driven from user space, and other USB devices go through `usb_raw`. To install compilers, SDKs and other tools, use Termux or Computer mode (`pkg install`, `pip`, and so on). The phone sandbox can't run downloaded programs.
 
+## File generation
+On by default (Settings, then File generation). Files appear in the chat with Open, Save and Share buttons, and images show inline.
+- `generate_image`: uses the image model you pick (any OpenAI-compatible provider: OpenRouter's chat image output, or the `/images/generations` API), so it works even when you chat with a text-only model. Images that a chat model returns on its own are shown too.
+- `create_document`: **PDF** (Android's PDF engine, full Unicode), **Word .docx**, **Excel .xlsx** (from CSV, multiple sheets), **ZIP** of workspace files, and any text format (md, html, csv, json, svg, ics, code...).
+- `text_to_speech`: a .wav file made with the phone's voice engine.
+- `write_file` accepts `encoding: base64`, so the model can write any binary file it can produce.
+- If a model rejects tool calls, Switchboard retries without tools automatically.
+
 ## Connectors, skills, agents, projects and scheduled tasks
 Everything below is in **Settings**, at the top of the page.
 - **Connectors**: **MCP servers** (remote, Streamable HTTP; their tools appear as `mcp__<server>__<tool>`) and **REST APIs** (one `api__<name>` request tool each). Auth options are none, bearer token, API-key header, username and password, or **OAuth 2.0**: authorization code with PKCE, redirect `switchboard://oauth`, automatic endpoint discovery and client registration for MCP servers, and token refresh. Tokens are encrypted on the device. Connector calls follow "Ask before each action".

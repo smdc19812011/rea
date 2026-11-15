@@ -49,8 +49,8 @@ class Runner(private val baseUrl: String, private val token: String, private val
         postJson("/exec", buildJsonObject { put("command", command); cwd?.let { put("cwd", it) }; put("timeout_sec", timeoutSec) }, client)
     }
 
-    suspend fun write(path: String, content: String): JsonObject = withContext(Dispatchers.IO) {
-        postJson("/write", buildJsonObject { put("path", path); put("content", content) })
+    suspend fun write(path: String, content: String, encoding: String? = null): JsonObject = withContext(Dispatchers.IO) {
+        postJson("/write", buildJsonObject { put("path", path); put("content", content); encoding?.let { put("encoding", it) } })
     }
 
     suspend fun read(path: String): JsonObject = withContext(Dispatchers.IO) { postJson("/read", buildJsonObject { put("path", path) }) }
@@ -104,10 +104,11 @@ class Runner(private val baseUrl: String, private val token: String, private val
                     putJsonObject("cwd") { put("type", "string"); put("description", "Working directory; relative paths are inside the runner workspace.") }
                     putJsonObject("timeout_sec") { put("type", "integer"); put("description", "Default 600, max 3600. Builds and installs may need more.") }
                 }),
-            ToolSpec("write_file", "Create or overwrite a text file on the runner machine. Relative paths are inside the runner workspace.",
+            ToolSpec("write_file", "Create or overwrite a file on the tool machine (text, or any binary file via base64). Relative paths are inside the workspace.",
                 schema(required = listOf("path", "content")) {
                     putJsonObject("path") { put("type", "string") }
-                    putJsonObject("content") { put("type", "string") }
+                    putJsonObject("content") { put("type", "string"); put("description", "File content: plain text, or base64 when encoding is base64") }
+                    putJsonObject("encoding") { put("type", "string"); put("description", "text (default) or base64 for binary files (images, audio, archives, ...)") }
                 }),
             ToolSpec("read_file", "Read a text file from the runner machine (first 100k characters).",
                 schema(required = listOf("path")) { putJsonObject("path") { put("type", "string") } }),
@@ -156,7 +157,7 @@ class Runner(private val baseUrl: String, private val token: String, private val
                     ToolResult("$head\n${r.str("output").orEmpty()}".trimEnd(), isError = exit != "0")
                 }
                 "write_file" -> {
-                    val r = write(a.str("path") ?: return ToolResult("Missing 'path'.", true), a.str("content").orEmpty())
+                    val r = write(a.str("path") ?: return ToolResult("Missing 'path'.", true), a.str("content").orEmpty(), a.str("encoding"))
                     ToolResult("Wrote ${r.str("bytes")} bytes to ${r.str("path")}.")
                 }
                 "read_file" -> {

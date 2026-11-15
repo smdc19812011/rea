@@ -192,4 +192,16 @@ class ChatClientTest {
         assertTrue("$bad", bad is ApiException && !isRetryable(bad))
         assertTrue(isRetryable(java.net.SocketException("Software caused connection abort")))
     }
+
+    @Test fun streamedImageOutputIsCollected() = runBlocking {
+        routes["/v1/chat/completions"] = 200 to listOf(
+            """{"choices":[{"delta":{"content":"Here:"}}]}""",
+            """{"choices":[{"delta":{"images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]},"finish_reason":"stop"}]}""",
+        ).joinToString("") { "data: $it\n\n" } + "data: [DONE]\n\n"
+        val p = Provider(name = "O", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = base, model = "m")
+        val end = ChatClient().stream(p, history, RequestOptions()).toList().filterIsInstance<StreamEvent.TurnEnd>().single()
+        assertEquals("Here:", end.text)
+        assertEquals(listOf("data:image/png;base64,iVBORw0KGgo="), end.images)
+        assertEquals("image/png", ImageGen.decodeDataUrl(end.images[0])!!.mime)
+    }
 }

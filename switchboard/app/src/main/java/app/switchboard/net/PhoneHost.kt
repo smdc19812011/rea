@@ -36,7 +36,9 @@ class PhoneHost(private val workspace: File, private val shell: String = "/syste
                 "run_command" -> run(a.str("command") ?: return ToolResult("Missing 'command'.", true), resolve(a.str("cwd")), a.int("timeout_sec", 600).coerceIn(1, 3600))
                 "write_file" -> withContext(Dispatchers.IO) {
                     val f = resolve(a.str("path") ?: return@withContext ToolResult("Missing 'path'.", true))
-                    f.parentFile?.mkdirs(); val bytes = a.str("content").orEmpty().toByteArray(); f.writeBytes(bytes)
+                    f.parentFile?.mkdirs()
+                    val bytes = if (a.str("encoding") == "base64") java.util.Base64.getMimeDecoder().decode(a.str("content").orEmpty()) else a.str("content").orEmpty().toByteArray()
+                    f.writeBytes(bytes)
                     ToolResult("Wrote ${bytes.size} bytes to $f.")
                 }
                 "read_file" -> withContext(Dispatchers.IO) {

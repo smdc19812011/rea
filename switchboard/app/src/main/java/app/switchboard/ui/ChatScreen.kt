@@ -73,6 +73,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.asImageBitmap
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -215,6 +216,7 @@ private fun AssistantBlock(
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (m.text.isEmpty() && m.toolCalls.isEmpty() && live) TypingDots()
         else if (m.text.isNotEmpty()) MarkdownText(m.text, if (m.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+        m.attachments.forEach { AttachmentCard(it) } // images etc. the model produced itself
         m.toolCalls.forEach { c ->
             ToolCard(c, results[c.id], awaiting = pending?.id == c.id, running = busy && results[c.id] == null && pending?.id != c.id, onDecide)
         }
@@ -241,6 +243,9 @@ private fun toolTitle(name: String) = when (name) {
     "schedule_task" -> "Schedule a task"
     "run_agent" -> "Ask an agent"
     "use_skill" -> "Load a skill"
+    "generate_image" -> "Generate image"
+    "create_document" -> "Create file"
+    "text_to_speech" -> "Create audio"
     else -> if (name.startsWith("mcp__") || name.startsWith("api__")) "Connector: " + name.substringAfter("__").replace("__", " › ") else name
 }
 
@@ -346,8 +351,26 @@ private fun AttachmentCard(a: app.switchboard.data.Attachment) {
             ctx.contentResolver.openOutputStream(dest)!!.use { out -> file.inputStream().use { it.copyTo(out) } }; "Saved"
         }.getOrElse { "Couldn't save: ${it.message}" }
     }
+    // Decoded off the main thread and downsampled to ~1200 px so big images don't use much memory.
+    val preview by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, a.path) {
+        if (a.mime.startsWith("image/") && a.mime != "image/svg+xml") value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(a.path, bounds)
+                var sample = 1; while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1200) sample *= 2
+                android.graphics.BitmapFactory.decodeFile(a.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })?.let {
+                    it.asImageBitmap()
+                }
+            }.getOrNull()
+        }
+    }
     Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
+            preview?.let { img ->
+                androidx.compose.foundation.Image(img, contentDescription = a.name,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).padding(bottom = 8.dp),
+                    contentScale = androidx.compose.ui.layout.ContentScale.FillWidth)
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(androidx.compose.material.icons.Icons.Default.Description, null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.size(8.dp))

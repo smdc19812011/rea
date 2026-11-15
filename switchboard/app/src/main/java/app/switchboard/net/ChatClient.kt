@@ -60,7 +60,8 @@ data class ToolSpec(val name: String, val description: String, val schema: JsonO
 sealed interface StreamEvent {
     data class TextDelta(val text: String) : StreamEvent
     /** Emitted once at the end of a successful turn. */
-    data class TurnEnd(val text: String, val toolCalls: List<ToolCall>, val anthropicBlocks: String?) : StreamEvent
+    /** [images] are data: or https: URLs of images the model produced itself (e.g. OpenRouter image models). */
+    data class TurnEnd(val text: String, val toolCalls: List<ToolCall>, val anthropicBlocks: String?, val images: List<String> = emptyList()) : StreamEvent
 }
 
 private val localHosts = setOf("localhost", "127.0.0.1", "10.0.2.2")
@@ -262,11 +263,16 @@ class ChatClient {
         private val text = StringBuilder()
         private class Partial(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder())
         private val calls = sortedMapOf<Int, Partial>()
+        private val images = mutableListOf<String>()
 
         override fun accept(o: JsonObject): String? {
             o["error"]?.let { throw ApiException((it as? JsonObject)?.str("message") ?: it.toString()) }
             val choice = o["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return null
             val delta = choice["delta"]?.jsonObject
+            // Image output: [{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]
+            (delta?.get("images") as? JsonArray)?.forEach { el ->
+                ((el as? JsonObject)?.get("image_url") as? JsonObject)?.str("url")?.let { images += it }
+            }
             (delta?.get("tool_calls") as? JsonArray)?.forEach { el ->
                 val tc = el.jsonObject
                 val p = calls.getOrPut(tc.int("index", calls.size)) { Partial() }
@@ -285,6 +291,7 @@ class ChatClient {
                 ToolCall(c.id.ifEmpty { "call_$i" }, c.name, c.args.toString().ifBlank { "{}" })
             },
             null,
+            images.toList(),
         )
     }
 
