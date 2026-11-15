@@ -53,6 +53,11 @@ class MainActivity : ComponentActivity() {
                 val drawer = rememberDrawerState(DrawerValue.Closed)
                 val scope = rememberCoroutineScope()
 
+                // System permission dialog for device tools (Bluetooth etc.), requested from the ViewModel.
+                val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()) { res -> vm.onPermissionsResult(res.values.all { it }) }
+                androidx.compose.runtime.LaunchedEffect(vm.permissionRequest) { vm.permissionRequest?.let { permLauncher.launch(it) } }
+
                 BackHandler(enabled = showSettings) { showSettings = false }
                 BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
 

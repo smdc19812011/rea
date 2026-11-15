@@ -51,6 +51,21 @@ The model loops on its own (call a tool, read the result, fix, retry, up to 40 s
 - The runner requires its token, listens only on 127.0.0.1 unless you pass `--host`, and runs with your user's permissions. Stop it with Ctrl+C when you're done.
 - The model needs to support tool calling (on OpenRouter, pick a model that lists tool support).
 
+## Devices: USB, Bluetooth and network
+These tools always run on the phone, because that's where the hardware is:
+
+| Tool | What it does |
+|---|---|
+| `list_devices` | USB devices plugged in (VID/PID, matching serial driver), Bluetooth (paired, plus a Classic and BLE scan), and the network (phone IP, mDNS/Bonjour services) |
+| `device_connect` | opens `usb_serial` (built-in drivers: CDC-ACM, CP210x, CH34x, FTDI), `usb_raw` (bulk/interrupt endpoints of any interface), `bt_serial` (SPP), `ble` (GATT; lists services and characteristics), `tcp`, `udp` |
+| `device_write` / `device_read` | send and receive bytes as text, hex or base64; BLE reads, writes and notifications by characteristic UUID |
+| `device_close` | closes a handle |
+| `http_request` | any HTTP(S) request; plain http is allowed to LAN addresses |
+| `download_file` | (This phone mode) saves a URL into the workspace, for example firmware or data to send_file |
+
+Android asks for USB access per device and for Bluetooth permission the first time. Listing, reading and closing don't need approval; connecting, writing, HTTP and downloads follow "Ask before each action".
+Android apps can't load kernel drivers, so USB-serial chips are driven from user space, and other USB devices go through `usb_raw`. To install compilers, SDKs and other tools, use Termux or Computer mode (`pkg install`, `pip`, and so on). The phone sandbox can't run downloaded programs.
+
 ## Request limits and time zone
 - **Per minute / per day** (Settings, then Request limits; blank means no limit) are shared by all chats and saved on the device. Every model request counts, including each step of a tool run.
 - When a limit is hit, the request waits and is sent automatically when the window opens. A countdown shows above the message box, and Stop cancels it. The app has to stay open during a long daily wait.

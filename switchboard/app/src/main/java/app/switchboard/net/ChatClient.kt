@@ -64,7 +64,12 @@ sealed interface StreamEvent {
 }
 
 private val localHosts = setOf("localhost", "127.0.0.1", "10.0.2.2")
-fun isLocalHost(host: String) = host in localHosts || host.endsWith(".local") || host.endsWith(".lan")
+fun isLocalHost(host: String): Boolean {
+    if (host in localHosts || host.endsWith(".local") || host.endsWith(".lan")) return true
+    // Private LAN ranges: 10/8, 172.16/12, 192.168/16, 169.254/16 (link-local).
+    val o = host.split('.').mapNotNull { it.toIntOrNull() }.takeIf { it.size == 4 } ?: return false
+    return o[0] == 10 || (o[0] == 172 && o[1] in 16..31) || (o[0] == 192 && o[1] == 168) || (o[0] == 169 && o[1] == 254)
+}
 
 /** Streams replies from either an Anthropic Messages endpoint or any OpenAI-compatible /chat/completions endpoint. */
 class ChatClient {

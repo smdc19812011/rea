@@ -28,6 +28,7 @@ import app.switchboard.net.Runner
 import app.switchboard.net.PhoneHost
 import app.switchboard.net.Termux
 import app.switchboard.net.ToolHost
+import app.switchboard.net.DeviceManager
 import app.switchboard.data.RunnerMode
 import app.switchboard.data.DailyReset
 import app.switchboard.data.RateLimiter
@@ -70,6 +71,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var approvalDecision: CompletableDeferred<Approval>? = null
     /** Chats where the user picked "Always allow" (cleared when the app restarts). */
     private val alwaysAllowed = mutableSetOf<String>()
+
+    /** Android runtime permissions the device tools are waiting for; MainActivity shows the system dialog. */
+    var permissionRequest by mutableStateOf<Array<String>?>(null); private set
+    private var permissionResult: CompletableDeferred<Boolean>? = null
+    fun onPermissionsResult(granted: Boolean) { permissionRequest = null; permissionResult?.complete(granted) }
+
+    private val devices = DeviceManager(app) { perms ->
+        val d = CompletableDeferred<Boolean>()
+        permissionResult = d
+        permissionRequest = perms
+        d.await()
+    }
+
+    override fun onCleared() { devices.closeAll(); super.onCleared() }
 
     val activeProvider: Provider?
         get() = settings.providers.firstOrNull { it.id == settings.activeProviderId } ?: settings.providers.firstOrNull()
@@ -250,7 +265,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runTool(call: ToolCall): ToolResult {
         // Sending a file only copies it into the chat, so it never needs approval.
         if (call.name == Runner.SEND_FILE) return sendFile(call)
-        if (settings.askBeforeRun && current.id !in alwaysAllowed) {
+        if (settings.askBeforeRun && current.id !in alwaysAllowed && call.name !in DeviceManager.noApproval) {
             val d = CompletableDeferred<Approval>()
             approvalDecision = d
             pendingApproval = call
@@ -261,7 +276,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 Approval.ONCE -> Unit
             }
         }
-        return if (call.name == Runner.INSTALL_APK) installApk(call) else host().execute(call)
+        return when (call.name) {
+            Runner.INSTALL_APK -> installApk(call)
+            in DeviceManager.names -> devices.execute(call, File(getApplication<Application>().filesDir, "workspace"), settings.unrestricted)
+            else -> host().execute(call)
+        }
     }
 
     private fun attachmentsDir(conversationId: String) = File(getApplication<Application>().filesDir, "attachments/$conversationId")
@@ -352,17 +371,20 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             RunnerMode.TERMUX -> "This is Termux on the user's phone (no root). Install tools with `pkg install -y ...`. " +
                 "To build an APK without Gradle: `pkg install -y openjdk-17 aapt aapt2 d8 apksigner zip`; find android.jar with `find ${'$'}PREFIX -name android.jar`; " +
                 "then aapt2 compile/link, javac against android.jar, d8, zip the dex in, and sign with apksigner using a debug keystore made by keytool. " +
-                "Gradle also works but is slow and needs android.aapt2FromMavenOverride pointing at Termux's aapt2."
+                "Gradle also works but is slow and needs android.aapt2FromMavenOverride pointing at Termux's aapt2. " +
+                "Other coding tools come from pkg too: python, nodejs, clang, rust, golang, openjdk-17, git, make, cmake, arduino-cli via pip or a release download, esptool via pip."
             RunnerMode.REMOTE -> "This is the user's own computer."
         }
         val toolNote = """
             You can act with tools: run_command, write_file, read_file, install_apk (installs an .apk onto the user's phone; they tap Install), and send_file (puts any file into this chat so the user can open, save or share it; use it whenever they ask you to send or give them a file).
             $info
             $modeNote
+            Devices: list_devices finds USB devices, Bluetooth (Classic and BLE) and local-network services; device_connect opens usb_serial, usb_raw, bt_serial, ble, tcp or udp; then device_write/device_read exchange bytes (text, hex or base64), and http_request talks to web APIs and smart devices. These always run on the phone itself. Android apps can't install kernel drivers: USB serial chips (CDC-ACM, CP210x, CH34x, FTDI) have built-in drivers, and other USB devices are reachable with usb_raw, where you implement the protocol over bulk/interrupt transfers.
+            You may download and install whatever tools a task needs (compilers, SDKs, libraries, CLIs) on the tool machine${if (settings.runnerMode == RunnerMode.PHONE) " — except that this phone sandbox can't run downloaded programs; download_file is for data and files only, so suggest Termux mode when real tools are needed" else ""}.
             Do the work yourself with these tools instead of telling the user to run commands: install missing packages, create files, build, fix errors, and retry.
             Keep commands non-interactive. Builds can take several minutes; set timeout_sec accordingly.
         """.trimIndent()
-        return base.copy(system = listOf(base.system, toolNote).filter { it.isNotBlank() }.joinToString("\n\n"), tools = Runner.tools)
+        return base.copy(system = listOf(base.system, toolNote).filter { it.isNotBlank() }.joinToString("\n\n"), tools = Runner.tools + DeviceManager.tools(includeDownload = settings.runnerMode == RunnerMode.PHONE))
     }
 
     suspend fun testRunner(): Result<String> = runCatching { "Connected: " + host().describe() }
