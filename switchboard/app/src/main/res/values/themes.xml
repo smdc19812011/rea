@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.Switchboard" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FFF7F5F0</item>
+    </style>
+</resources>
