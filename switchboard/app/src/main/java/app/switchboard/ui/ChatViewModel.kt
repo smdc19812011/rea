@@ -174,13 +174,54 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         io { store.delete(id); attachmentsDir(id).deleteRecursively() }
     }
 
-    fun send(text: String) {
+    /**
+     * [asImage] = the composer's image button is on. "/image ..." and (with auto-detect on) clear picture requests
+     * go straight to the image model, so they work even when the chat model ignores tools.
+     */
+    fun send(text: String, asImage: Boolean = false) {
         val provider = providerFor(currentAgent) ?: return
         val trimmed = text.trim()
         if (trimmed.isEmpty() || streaming) return
-        val title = if (current.messages.isEmpty()) trimmed.lineSequence().first().take(48) else current.title
+        val title = if (current.messages.isEmpty()) trimmed.lineSequence().first().removePrefix("/image").trim().take(48) else current.title
         current = current.copy(title = title, messages = current.messages + ChatMessage(role = Role.USER, text = trimmed))
-        respond(provider)
+        val command = Regex("^/(image|img|draw)\\s+", RegexOption.IGNORE_CASE).find(trimmed)
+        when {
+            command != null -> respondWithImage(trimmed.substring(command.range.last + 1))
+            asImage -> respondWithImage(trimmed)
+            settings.fileTools && settings.autoImage && looksLikeImageRequest(trimmed) -> respondWithImage(trimmed)
+            else -> respond(provider)
+        }
+    }
+
+    /** Generates an image directly from the user's words and posts it as the reply. */
+    private fun respondWithImage(prompt: String) {
+        val p = imageProvider()
+        val model = settings.imageGen.model.ifBlank { p?.let { ImageGen.defaultModel(it) }.orEmpty() }
+        val reply = ChatMessage(role = Role.ASSISTANT, text = "", source = "Image · ${model.ifBlank { "no model" }}")
+        current = current.copy(messages = current.messages + reply)
+        streaming = true
+        WorkService.start(getApplication(), "Generating an image")
+        job = viewModelScope.launch {
+            try {
+                if (p == null) error("No image provider is set up. Choose one in Settings > File generation (OpenRouter or OpenAI).")
+                toolStatus = "Generating image with $model…"
+                awaitRateLimit()
+                toolStatus = "Generating image with $model…"
+                val (files, note) = ImageGen().generate(p, settings.imageGen.model, settings.imageGen.method, prompt, settings.imageGen.size, settings.unrestricted)
+                val base = "image-${System.currentTimeMillis() / 1000}"
+                val atts = withContext(Dispatchers.IO) { files.mapIndexed { i, f -> saveAttachment(f.bytes, "$base${if (files.size > 1) "-${i + 1}" else ""}.${f.extension}", f.mime) } }
+                updateReply(reply.id) { it.copy(text = note.trim().ifBlank { "Here's your image." }.take(2000), attachments = atts) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                updateReply(reply.id) { it.copy(text = "(stopped)", isError = true) }
+                throw e
+            } catch (e: Exception) {
+                updateReply(reply.id) { it.copy(text = "⚠ ${e.message}\n\nCheck the image model in Settings > File generation.", isError = true) }
+            } finally {
+                toolStatus = null; streaming = false
+                WorkService.stop(getApplication())
+                persistCurrent()
+            }
+        }
     }
 
     /** Re-run the last reply, optionally on whichever provider/model is active now. */
@@ -514,9 +555,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             tools += listOf(FileTools.createDocument, FileTools.textToSpeech)
             val img = imageProvider()
             if (img != null) tools += FileTools.generateImage
-            sys += "You can make files for the user: create_document (PDF, Word, Excel, ZIP, or any text format), text_to_speech (audio)" +
+            sys.add(1, "You can make files for the user: create_document (PDF, Word, Excel, ZIP, or any text format), text_to_speech (audio)" +
                 (if (img != null) ", and generate_image (pictures via ${img.name})" else "") +
-                ". Files appear in the chat with Open/Save/Share buttons. Use these instead of saying you can't create a file."
+                ". Files appear in the chat with Open/Save/Share buttons. Never say you can't make images or files: call these tools.")
         }
         if (allowAgents && toolsAllowed && settings.agents.isNotEmpty()) { tools += Extras.runAgent; sys += Extras.agentsNote(settings.agents) }
         return base.copy(system = sys.filter { it.isNotBlank() }.joinToString("\n\n"), tools = tools)
@@ -654,6 +695,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setFileTools(v: Boolean) = updateSettings { it.copy(fileTools = v) }
+    fun setAutoImage(v: Boolean) = updateSettings { it.copy(autoImage = v) }
     fun setImageGen(c: app.switchboard.data.ImageGenConfig) = updateSettings { it.copy(imageGen = c) }
 
     // --- agents (run_agent) ---
@@ -904,3 +946,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun io(block: () -> Unit) { viewModelScope.launch(Dispatchers.IO) { block() } }
 }
+
+private val imageNouns = "image|picture|pic|photo|photograph|drawing|illustration|painting|artwork|art|logo|icon|wallpaper|portrait|sketch|poster|render|cartoon|avatar"
+private val imageAsk = Regex("^\\s*(please\\s+|can you\\s+|could you\\s+)?(generate|create|make|draw|paint|render|design|produce|give me|show me|imagine)\\b.{0,60}?\\b($imageNouns)s?\\b", RegexOption.IGNORE_CASE)
+private val drawAsk = Regex("^\\s*(please\\s+|can you\\s+|could you\\s+)?(draw|paint|sketch|illustrate)\\s+(me\\s+)?(a|an|the|some|my)\\b", RegexOption.IGNORE_CASE)
+/** Requests for code-made graphics stay with the chat model. */
+private val notPicture = Regex("\\b(svg|html|css|code|ascii|chart|graph|diagram|plot|mermaid|latex|qr|table|spreadsheet|uml|flowchart)\\b", RegexOption.IGNORE_CASE)
+
+/** True for messages that clearly ask for a picture, e.g. "generate an image of a man fighting a dragon". */
+fun looksLikeImageRequest(text: String): Boolean =
+    text.length < 1500 && !notPicture.containsMatchIn(text) && (imageAsk.containsMatchIn(text) || drawAsk.containsMatchIn(text))

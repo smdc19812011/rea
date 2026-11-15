@@ -66,6 +66,7 @@ import app.switchboard.net.Runner
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.runtime.remember
 import androidx.compose.material3.CircularProgressIndicator
@@ -83,12 +84,12 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
     val notifPermission = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
     var askedNotif by rememberSaveable { mutableStateOf(false) }
-    val send: (String) -> Unit = { text ->
+    val send: (String, Boolean) -> Unit = { text, asImage ->
         if (android.os.Build.VERSION.SDK_INT >= 33 && !askedNotif &&
             ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             askedNotif = true; notifPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         }
-        vm.send(text)
+        vm.send(text, asImage)
     }
     Scaffold(
         topBar = {
@@ -158,7 +159,7 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
                 "$dayLeft/${st.maxPerDay} remaining 24hr".takeIf { st.maxPerDay > 0 },
             ).joinToString("   ").ifEmpty { null }
             val exhausted = (st.maxPerMinute > 0 && minLeft == 0) || (st.maxPerDay > 0 && dayLeft == 0)
-            Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop, footer = footer, footerWarn = exhausted)
+            Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop, footer = footer, footerWarn = exhausted, imageButton = vm.settings.fileTools)
         }
     }
 }
@@ -293,14 +294,21 @@ private fun TypingDots() {
 }
 
 @Composable
-private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String) -> Unit, onStop: () -> Unit, footer: String? = null, footerWarn: Boolean = false) {
+private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String, Boolean) -> Unit, onStop: () -> Unit, footer: String? = null, footerWarn: Boolean = false, imageButton: Boolean = false) {
     var text by rememberSaveable { mutableStateOf("") }
+    var imageMode by rememberSaveable { mutableStateOf(false) }
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)) {
       Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (footer != null) 4.dp else 12.dp), verticalAlignment = Alignment.Bottom) {
+            if (imageButton) {
+                androidx.compose.material3.IconToggleButton(checked = imageMode, onCheckedChange = { imageMode = it }, modifier = Modifier.size(48.dp)) {
+                    Icon(androidx.compose.material.icons.Icons.Default.Palette, if (imageMode) "Image mode on: your message makes a picture" else "Make a picture",
+                        tint = if (imageMode) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
             TextField(
                 value = text, onValueChange = { text = it }, enabled = enabled,
-                placeholder = { Text("Message") }, maxLines = 6,
+                placeholder = { Text(if (imageMode) "Describe the image" else "Message") }, maxLines = 6,
                 modifier = Modifier.weight(1f),
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = MaterialTheme.colorScheme.surface, unfocusedContainerColor = MaterialTheme.colorScheme.surface,
@@ -316,7 +324,7 @@ private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String) -> U
                 FilledIconButton(onClick = onStop, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, "Stop generating") }
             } else {
                 FilledIconButton(
-                    onClick = { onSend(text); text = "" }, enabled = enabled && text.isNotBlank(), modifier = Modifier.size(48.dp),
+                    onClick = { onSend(text, imageMode); text = "" }, enabled = enabled && text.isNotBlank(), modifier = Modifier.size(48.dp),
                     colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
                 ) { Icon(Icons.Default.ArrowUpward, "Send") }
             }

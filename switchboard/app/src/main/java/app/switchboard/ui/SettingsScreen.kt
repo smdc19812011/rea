@@ -428,6 +428,14 @@ private fun FileGenSection(vm: ChatViewModel) {
         Switch(checked = s.fileTools, onCheckedChange = vm::setFileTools)
     }
     if (!s.fileTools) return
+    FRow(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Detect picture requests", style = MaterialTheme.typography.bodyLarge)
+            Text("Messages like \"generate an image of…\" or \"draw a…\" go straight to the image model. You can also use the 🎨 button or type /image.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = s.autoImage, onCheckedChange = vm::setAutoImage)
+    }
     Text("Images are made by an image model, even when you chat with a text-only model. OpenRouter and OpenAI work; Anthropic doesn't make images.",
         style = MaterialTheme.typography.bodySmall)
     val compatible = s.providers.filter { it.kind == app.switchboard.data.ApiKind.OPENAI_COMPATIBLE }

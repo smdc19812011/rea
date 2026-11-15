@@ -74,6 +74,7 @@ Android apps can't load kernel drivers, so USB-serial chips are driven from user
 
 ## File generation
 On by default (Settings, then File generation). Files appear in the chat with Open, Save and Share buttons, and images show inline.
+- **Pictures without relying on the chat model**: the 🎨 button next to the message box, `/image <description>`, or (on by default) automatic detection of messages like "generate an image of…" or "draw a…" send the request straight to the image model. Requests for SVG, diagrams, charts or code stay with the chat model.
 - `generate_image`: uses the image model you pick (any OpenAI-compatible provider: OpenRouter's chat image output, or the `/images/generations` API), so it works even when you chat with a text-only model. Images that a chat model returns on its own are shown too.
 - `create_document`: **PDF** (Android's PDF engine, full Unicode), **Word .docx**, **Excel .xlsx** (from CSV, multiple sheets), **ZIP** of workspace files, and any text format (md, html, csv, json, svg, ics, code...).
 - `text_to_speech`: a .wav file made with the phone's voice engine.

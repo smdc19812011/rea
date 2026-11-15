@@ -212,6 +212,8 @@ data class AppSettings(
     val tasks: List<ScheduledTask> = emptyList(),
     /** Offer generate_image, create_document and text_to_speech to the model. */
     val fileTools: Boolean = true,
+    /** Send messages that clearly ask for a picture straight to the image model (doesn't rely on the chat model using tools). */
+    val autoImage: Boolean = true,
     val imageGen: ImageGenConfig = ImageGenConfig(),
 )
 
