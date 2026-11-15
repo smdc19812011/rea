@@ -18,6 +18,8 @@ import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import app.switchboard.data.ToolCall
+import app.switchboard.data.Attachment
+import android.webkit.MimeTypeMap
 import app.switchboard.net.ChatClient
 import app.switchboard.net.isRetryable
 import app.switchboard.WorkService
@@ -88,7 +90,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun delete(id: String) {
         conversations = conversations.filterNot { it.id == id }
         if (current.id == id) current = Conversation()
-        io { store.delete(id) }
+        io { store.delete(id); attachmentsDir(id).deleteRecursively() }
     }
 
     fun send(text: String) {
@@ -139,7 +141,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     for (call in calls) {
                         val r = runTool(call)
-                        current = current.copy(messages = current.messages + ChatMessage(role = Role.TOOL, text = r.text, toolCallId = call.id, isError = r.isError))
+                        current = current.copy(messages = current.messages + ChatMessage(role = Role.TOOL, text = r.text, toolCallId = call.id, isError = r.isError, attachments = r.attachments))
                         persistCurrent()
                     }
                 }
@@ -246,6 +248,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun decide(a: Approval) { approvalDecision?.complete(a) }
 
     private suspend fun runTool(call: ToolCall): ToolResult {
+        // Sending a file only copies it into the chat, so it never needs approval.
+        if (call.name == Runner.SEND_FILE) return sendFile(call)
         if (settings.askBeforeRun && current.id !in alwaysAllowed) {
             val d = CompletableDeferred<Approval>()
             approvalDecision = d
@@ -258,6 +262,23 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         return if (call.name == Runner.INSTALL_APK) installApk(call) else host().execute(call)
+    }
+
+    private fun attachmentsDir(conversationId: String) = File(getApplication<Application>().filesDir, "attachments/$conversationId")
+
+    /** Copies a file from the tool machine into the chat as an attachment the user can open, save or share. */
+    private suspend fun sendFile(call: ToolCall): ToolResult {
+        val args = runCatching { Json.parseToJsonElement(call.arguments).jsonObject }.getOrNull()
+        val path = args?.str("path")?.takeIf { it.isNotBlank() } ?: return ToolResult("Missing 'path'.", true)
+        val name = File(path).name.ifBlank { "file" }
+        val dest = File(attachmentsDir(current.id), "${java.util.UUID.randomUUID().toString().take(8)}-$name")
+        runCatching { host().fetchFile(path, dest) }.onFailure { dest.delete(); return ToolResult("Couldn't send $path: ${it.message}", true) }
+        if (dest.length() > MAX_ATTACHMENT) { dest.delete(); return ToolResult("$name is larger than 200 MB; compress or split it first.", true) }
+        val ext = name.substringAfterLast('.', "").lowercase()
+        val mime = when (ext) { "apk" -> "application/vnd.android.package-archive"; else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream" }
+        val att = Attachment(name, dest.path, dest.length(), mime)
+        val caption = args.str("caption")?.let { " Caption: $it" } ?: ""
+        return ToolResult("Sent $name (${dest.length()} bytes) to the chat. The user can open, save or share it.$caption", attachments = listOf(att))
     }
 
     private fun host(): ToolHost = when (settings.runnerMode) {
@@ -335,7 +356,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             RunnerMode.REMOTE -> "This is the user's own computer."
         }
         val toolNote = """
-            You can act with tools: run_command, write_file, read_file, and install_apk (installs an .apk onto the user's phone; they tap Install).
+            You can act with tools: run_command, write_file, read_file, install_apk (installs an .apk onto the user's phone; they tap Install), and send_file (puts any file into this chat so the user can open, save or share it; use it whenever they ask you to send or give them a file).
             $info
             $modeNote
             Do the work yourself with these tools instead of telling the user to run commands: install missing packages, create files, build, fix errors, and retry.
@@ -424,7 +445,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         io { store.saveSettings(snapshot) }
     }
 
-    companion object { const val MAX_TOOL_STEPS = 40 }
+    companion object { const val MAX_TOOL_STEPS = 40
+        const val MAX_ATTACHMENT = 200L * 1024 * 1024 }
 
     private fun io(block: () -> Unit) { viewModelScope.launch(Dispatchers.IO) { block() } }
 }

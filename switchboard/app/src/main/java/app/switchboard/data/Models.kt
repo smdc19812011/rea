@@ -29,6 +29,10 @@ enum class Role { USER, ASSISTANT, TOOL }
 @Serializable
 data class ToolCall(val id: String, val name: String, val arguments: String)
 
+/** A file the model sent into the chat; [path] is the copy in Switchboard's private storage. */
+@Serializable
+data class Attachment(val name: String, val path: String, val size: Long, val mime: String)
+
 @Serializable
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
@@ -43,6 +47,8 @@ data class ChatMessage(
     val anthropicBlocks: String? = null,
     /** Tool only: which call this result answers. */
     val toolCallId: String? = null,
+    /** Tool only: files delivered to the chat by send_file. */
+    val attachments: List<Attachment> = emptyList(),
 )
 
 @Serializable

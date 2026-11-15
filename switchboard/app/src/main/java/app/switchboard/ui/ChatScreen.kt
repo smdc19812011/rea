@@ -66,6 +66,8 @@ import app.switchboard.net.Runner
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.runtime.remember
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.TextButton
@@ -208,6 +210,7 @@ private fun toolTitle(name: String) = when (name) {
     "write_file" -> "Write file"
     "read_file" -> "Read file"
     Runner.INSTALL_APK -> "Install APK on this phone"
+    Runner.SEND_FILE -> "Send file"
     else -> name
 }
 
@@ -238,6 +241,7 @@ private fun ToolCard(call: ToolCall, result: ChatMessage?, awaiting: Boolean, ru
             OutlinedButton(onClick = { onDecide(ChatViewModel.Approval.ALWAYS) }) { Text("Always") }
             TextButton(onClick = { onDecide(ChatViewModel.Approval.DENY) }) { Text("Deny") }
         }
+        result?.attachments?.forEach { AttachmentCard(it) }
         if (result != null && expanded) SelectionContainer {
             Text(result.text, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(8.dp))
@@ -280,6 +284,59 @@ private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String) -> U
                     colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
                 ) { Icon(Icons.Default.ArrowUpward, "Send") }
             }
+        }
+    }
+}
+
+
+private fun humanSize(bytes: Long): String = when {
+    bytes >= 1L shl 20 -> "%.1f MB".format(bytes / 1048576.0)
+    bytes >= 1L shl 10 -> "%.0f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
+
+/** A file the model sent: open it with another app (an APK opens the installer), save a copy, or share it. */
+@Composable
+private fun AttachmentCard(a: app.switchboard.data.Attachment) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val file = remember(a.path) { java.io.File(a.path) }
+    var note by remember(a.path) { mutableStateOf<String?>(null) }
+    fun uri() = androidx.core.content.FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", file)
+    val save = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument(a.mime)) { dest ->
+        if (dest != null) note = runCatching {
+            ctx.contentResolver.openOutputStream(dest)!!.use { out -> file.inputStream().use { it.copyTo(out) } }; "Saved"
+        }.getOrElse { "Couldn't save: ${it.message}" }
+    }
+    Surface(color = MaterialTheme.colorScheme.surface, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(androidx.compose.material.icons.Icons.Default.Description, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.size(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(a.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(humanSize(a.size), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (!file.exists()) {
+                Text("This file is no longer on the phone.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                return@Column
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = {
+                    note = runCatching {
+                        ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW).setDataAndType(uri(), a.mime)
+                            .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)); null
+                    }.getOrElse { "No app on this phone opens this type of file. Use Save or Share." }
+                }) { Text(if (a.mime == "application/vnd.android.package-archive") "Install" else "Open") }
+                TextButton(onClick = { save.launch(a.name) }) { Text("Save") }
+                TextButton(onClick = {
+                    val send = android.content.Intent(android.content.Intent.ACTION_SEND).setType(a.mime)
+                        .putExtra(android.content.Intent.EXTRA_STREAM, uri()).addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    ctx.startActivity(android.content.Intent.createChooser(send, a.name))
+                }) { Text("Share") }
+            }
+            note?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
         }
     }
 }

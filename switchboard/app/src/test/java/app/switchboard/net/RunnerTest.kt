@@ -61,4 +61,13 @@ class RunnerTest {
         val r = Runner("http://example.invalid:8765", TOKEN, false).execute(ToolCall("7", "read_file", """{"path":"x"}"""))
         assertTrue(r.text, r.isError && r.text.contains("plain http://"))
     }
+
+    @Test fun sendFileToolIsOfferedAndBinaryDownloadsIntact() = runBlocking {
+        assertTrue(Runner.tools.any { it.name == Runner.SEND_FILE && it.schema.toString().contains("\"required\":[\"path\"]") })
+        val bytes = ByteArray(300_000) { (it * 31 % 251).toByte() }
+        File(workspace, "out/app.apk").apply { parentFile!!.mkdirs(); writeBytes(bytes) }
+        val dest = File(workspace, "received.apk"); runner.download("out/app.apk", dest)
+        assertTrue(dest.readBytes().contentEquals(bytes))
+        assertEquals("out/app.apk", Runner.describe(ToolCall("8", Runner.SEND_FILE, """{"path":"out/app.apk","caption":"here"}""")))
+    }
 }

@@ -37,6 +37,7 @@ A phone can't run Android Studio, so Switchboard gives the model four tools and 
 | `run_command` | runner machine | shell command (bash), up to 1 hour, returns exit code + output tail |
 | `write_file` / `read_file` | runner machine | create, overwrite or read text files (relative paths are inside `~/switchboard-workspace`) |
 | `install_apk` | this phone | downloads a built `.apk` from the runner and opens Android's installer; you tap Install |
+| `send_file` | this phone | puts any file from the tool machine into the chat (up to 200 MB) with Open, Save and Share buttons; no approval needed |
 
 The model loops on its own (call a tool, read the result, fix, retry, up to 40 steps), so it can install packages, write a project, build it and install the APK.
 

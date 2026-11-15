@@ -18,7 +18,7 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /** Result handed back to the model. */
-data class ToolResult(val text: String, val isError: Boolean = false)
+data class ToolResult(val text: String, val isError: Boolean = false, val attachments: List<app.switchboard.data.Attachment> = emptyList())
 
 /** Somewhere tool actions run: the app's own sandbox, or runner.py in Termux / on a computer. */
 interface ToolHost {
@@ -93,6 +93,7 @@ class Runner(private val baseUrl: String, private val token: String, private val
 
     companion object {
         const val INSTALL_APK = "install_apk"
+        const val SEND_FILE = "send_file"
 
         val tools: List<ToolSpec> = listOf(
             ToolSpec("run_command",
@@ -113,6 +114,13 @@ class Runner(private val baseUrl: String, private val token: String, private val
             ToolSpec(INSTALL_APK,
                 "Copy an .apk built on the runner machine to the user's phone and open Android's installer. The user confirms the install.",
                 schema(required = listOf("path")) { putJsonObject("path") { put("type", "string"); put("description", "Path to the .apk on the runner machine.") } }),
+            ToolSpec(SEND_FILE,
+                "Send any file (APK, zip, image, PDF, document, anything) from the tool machine into this chat, where the user can open, save or share it. " +
+                    "Use it whenever the user asks you to send, give, share or attach a file. Up to 200 MB.",
+                schema(required = listOf("path")) {
+                    putJsonObject("path") { put("type", "string"); put("description", "Path to the file on the tool machine.") }
+                    putJsonObject("caption") { put("type", "string"); put("description", "Optional short note shown with the file.") }
+                }),
         )
 
         private fun schema(required: List<String>, props: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit) = buildJsonObject {
@@ -126,7 +134,7 @@ class Runner(private val baseUrl: String, private val token: String, private val
             val a = runCatching { Json.parseToJsonElement(call.arguments).jsonObject }.getOrNull()
             return when (call.name) {
                 "run_command" -> a?.str("command") ?: call.arguments
-                "write_file", "read_file", INSTALL_APK -> a?.str("path") ?: call.arguments
+                "write_file", "read_file", INSTALL_APK, SEND_FILE -> a?.str("path") ?: call.arguments
                 else -> call.arguments
             }
         }
