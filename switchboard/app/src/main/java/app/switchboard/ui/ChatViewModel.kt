@@ -29,6 +29,8 @@ import app.switchboard.net.PhoneHost
 import app.switchboard.net.Termux
 import app.switchboard.net.ToolHost
 import app.switchboard.net.DeviceManager
+import app.switchboard.build.ApkBuilder
+import app.switchboard.net.ToolSpec
 import app.switchboard.data.RunnerMode
 import app.switchboard.data.DailyReset
 import app.switchboard.data.RateLimiter
@@ -44,6 +46,7 @@ import java.io.File
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -265,6 +268,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun runTool(call: ToolCall): ToolResult {
         // Sending a file only copies it into the chat, so it never needs approval.
         if (call.name == Runner.SEND_FILE) return sendFile(call)
+        // Building only writes inside Switchboard's storage; installing still goes through Android's own prompt.
+        if (call.name == BUILD_APK) return buildApk(call)
         if (settings.askBeforeRun && current.id !in alwaysAllowed && call.name !in DeviceManager.noApproval) {
             val d = CompletableDeferred<Approval>()
             approvalDecision = d
@@ -286,6 +291,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun attachmentsDir(conversationId: String) = File(getApplication<Application>().filesDir, "attachments/$conversationId")
 
     /** Copies a file from the tool machine into the chat as an attachment the user can open, save or share. */
+    /** Packages a web app (index.html + assets) in the phone workspace into a signed APK and attaches it to the chat. */
+    private suspend fun buildApk(call: ToolCall): ToolResult = withContext(Dispatchers.IO) {
+        val ctx = getApplication<Application>()
+        val a = runCatching { Json.parseToJsonElement(call.arguments).jsonObject }.getOrNull() ?: return@withContext ToolResult("Arguments were not valid JSON.", true)
+        val workspace = File(ctx.filesDir, "workspace")
+        val dir = a.str("source_dir") ?: return@withContext ToolResult("Missing 'source_dir'.", true)
+        val src = (if (dir.startsWith("/")) File(dir) else File(workspace, dir)).normalize()
+        val spec = runCatching {
+            ApkBuilder.Spec(
+                appName = a.str("app_name") ?: error("Missing 'app_name'."),
+                packageName = a.str("package") ?: error("Missing 'package'."),
+                versionName = a.str("version_name") ?: "1.0",
+                versionCode = a.str("version_code")?.toIntOrNull() ?: 1,
+                permissions = (a["permissions"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }.orEmpty(),
+                orientation = a.str("orientation")?.lowercase()?.takeIf { it == "portrait" || it == "landscape" },
+            )
+        }.getOrElse { return@withContext ToolResult(it.message ?: "Bad arguments.", true) }
+        val out = File(workspace, "builds/${spec.packageName}-${spec.versionName}.apk")
+        runCatching {
+            val dex = ctx.assets.open("apk-template/classes.dex").use { it.readBytes() }
+            ApkBuilder(dex, File(ctx.filesDir, "keys")).build(src, spec, out)
+        }.onFailure { return@withContext ToolResult("Build failed: ${it.message}", true) }
+        val dest = File(attachmentsDir(current.id), "${java.util.UUID.randomUUID().toString().take(8)}-${out.name}")
+        dest.parentFile?.mkdirs(); out.copyTo(dest, overwrite = true)
+        val att = Attachment(out.name, dest.path, dest.length(), "application/vnd.android.package-archive")
+        ToolResult("Built ${out.name} (${out.length() / 1024} KB, ${spec.appName} ${spec.versionName}, versionCode ${spec.versionCode}) at ${out.path}. " +
+            "It's attached in the chat; the user taps Install. To ship an update, rebuild with a higher version_code.", attachments = listOf(att))
+    }
+
     private suspend fun sendFile(call: ToolCall): ToolResult {
         val args = runCatching { Json.parseToJsonElement(call.arguments).jsonObject }.getOrNull()
         val path = args?.str("path")?.takeIf { it.isNotBlank() } ?: return ToolResult("Missing 'path'.", true)
@@ -367,7 +401,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         )
         val modeNote = when (settings.runnerMode) {
             RunnerMode.PHONE -> "This is Switchboard's own app sandbox: Android's toybox shell only. There is no package manager, compiler, Java or Python, and nothing can be installed. " +
-                "If the task needs real tools (for example building an APK), say so and tell the user to switch Settings > Tools to \"Termux on this phone\"."
+                "You CAN still build Android apps here: write the app as a web app (index.html plus CSS, JavaScript, images, sounds) in a folder in the workspace with write_file, " +
+                "then call build_apk. That makes a real, signed APK and attaches it to this chat for the user to install, so do this instead of telling the user to build it themselves. " +
+                "Make it self-contained (no CDN links unless you request the INTERNET permission), mobile-friendly (viewport meta tag, touch-sized controls), and save data with localStorage. " +
+                "Only apps that truly need native Java/Kotlin code require Termux mode (Settings > Tools > Termux)."
             RunnerMode.TERMUX -> "This is Termux on the user's phone (no root). Install tools with `pkg install -y ...`. " +
                 "To build an APK without Gradle: `pkg install -y openjdk-17 aapt aapt2 d8 apksigner zip`; find android.jar with `find ${'$'}PREFIX -name android.jar`; " +
                 "then aapt2 compile/link, javac against android.jar, d8, zip the dex in, and sign with apksigner using a debug keystore made by keytool. " +
@@ -384,7 +421,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Do the work yourself with these tools instead of telling the user to run commands: install missing packages, create files, build, fix errors, and retry.
             Keep commands non-interactive. Builds can take several minutes; set timeout_sec accordingly.
         """.trimIndent()
-        return base.copy(system = listOf(base.system, toolNote).filter { it.isNotBlank() }.joinToString("\n\n"), tools = Runner.tools + DeviceManager.tools(includeDownload = settings.runnerMode == RunnerMode.PHONE))
+        return base.copy(system = listOf(base.system, toolNote).filter { it.isNotBlank() }.joinToString("\n\n"), tools = Runner.tools + DeviceManager.tools(includeDownload = settings.runnerMode == RunnerMode.PHONE) + listOfNotNull(BUILD_APK_SPEC.takeIf { settings.runnerMode == RunnerMode.PHONE }))
     }
 
     suspend fun testRunner(): Result<String> = runCatching { "Connected: " + host().describe() }
@@ -468,6 +505,24 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object { const val MAX_TOOL_STEPS = 40
+        const val BUILD_APK = "build_apk"
+        private fun prop(type: String, desc: String) = kotlinx.serialization.json.buildJsonObject { put("type", type); put("description", desc) }
+        val BUILD_APK_SPEC = ToolSpec(BUILD_APK,
+            "Build an installable Android app (signed APK) on this phone from a web app folder in the workspace. The folder must contain index.html; " +
+                "everything in it (CSS, JS, images, sounds, fonts) is packaged and shown full screen. The APK is attached to the chat for the user to install.",
+            kotlinx.serialization.json.buildJsonObject {
+                put("type", "object")
+                put("properties", kotlinx.serialization.json.buildJsonObject {
+                    put("source_dir", prop("string", "Workspace folder containing index.html, e.g. TimezoneClock/www"))
+                    put("app_name", prop("string", "Name shown under the app icon"))
+                    put("package", prop("string", "Unique app id like com.user.timezoneclock; keep it the same for updates"))
+                    put("version_name", prop("string", "e.g. 1.0"))
+                    put("version_code", prop("integer", "Whole number; increase it for each update"))
+                    put("permissions", kotlinx.serialization.json.buildJsonObject { put("type", "array"); put("items", kotlinx.serialization.json.buildJsonObject { put("type", "string") }); put("description", "Android permissions, e.g. [\"INTERNET\", \"VIBRATE\"]") })
+                    put("orientation", prop("string", "portrait, landscape, or omit for both"))
+                })
+                put("required", kotlinx.serialization.json.JsonArray(listOf("source_dir", "app_name", "package").map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            })
         const val MAX_ATTACHMENT = 200L * 1024 * 1024 }
 
     private fun io(block: () -> Unit) { viewModelScope.launch(Dispatchers.IO) { block() } }

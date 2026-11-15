@@ -51,6 +51,12 @@ The model loops on its own (call a tool, read the result, fix, retry, up to 40 s
 - The runner requires its token, listens only on 127.0.0.1 unless you pass `--host`, and runs with your user's permissions. Stop it with Ctrl+C when you're done.
 - The model needs to support tool calling (on OpenRouter, pick a model that lists tool support).
 
+## Build Android apps on the phone (no Termux)
+In **This phone** mode the model has a `build_apk` tool. It writes the app as a web app (`index.html` plus CSS, JS and assets) in the workspace, and Switchboard packages it into a real, signed APK that's attached to the chat with an **Install** button.
+- Runtime: a 3 KB WebView activity (`tools/apk-template/`, rebuild with `build.sh`) shows `assets/www/index.html` full screen. JavaScript and localStorage are on, and links to websites open in the browser.
+- Switchboard writes the binary AndroidManifest itself (package, version, label, permissions, orientation) and signs with apksig (v2) using a key generated once per phone, so rebuilt versions install as updates.
+- Apps use the default Android icon. Apps that need native Java/Kotlin code still need Termux mode.
+
 ## Devices: USB, Bluetooth and network
 These tools always run on the phone, because that's where the hardware is:
 

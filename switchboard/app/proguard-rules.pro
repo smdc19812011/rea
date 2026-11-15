@@ -6,3 +6,7 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# apksig (on-device APK signing)
+-keep class com.android.apksig.** { *; }
+-dontwarn com.android.apksig.**

@@ -222,6 +222,7 @@ private fun toolTitle(name: String) = when (name) {
     "read_file" -> "Read file"
     Runner.INSTALL_APK -> "Install APK on this phone"
     Runner.SEND_FILE -> "Send file"
+    ChatViewModel.BUILD_APK -> "Build Android app"
     else -> name
 }
 
