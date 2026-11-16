@@ -154,11 +154,12 @@ class TaskWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         val conv = existing ?: Conversation(title = if (t.sameChat) "⏰ ${t.name}" else "⏰ ${t.name} · $stamp", projectId = t.projectId, agentId = t.agentId)
         val history = conv.messages + ChatMessage(role = Role.USER, text = t.prompt)
 
-        val limiter = RateLimiter(File(ctx.filesDir, "request_times.csv"))
-        val limits = RateLimiter.Limits(s.maxPerMinute, s.maxPerDay, s.dailyReset, zone)
-        val runner = AgentRunner(ChatClient()) {
+        val limiter = RateLimiter(File(ctx.filesDir, "request_limits.tsv"))
+        val runner = AgentRunner(ChatClient()) { pr ->
+            val l = pr.limits[pr.model] ?: app.switchboard.data.ModelLimit()
+            val limits = RateLimiter.Limits(l.perMinute, l.perDay, s.dailyReset, zone)
             while (true) {
-                val w = limiter.tryAcquire(limits) ?: break
+                val w = limiter.tryAcquire(RateLimiter.key(pr.id, pr.model), limits) ?: break
                 if (w.scope == RateLimiter.Scope.DAY) throw IllegalStateException("daily request limit reached")
                 delay((w.untilMs - System.currentTimeMillis()).coerceIn(200, 60_000))
             }

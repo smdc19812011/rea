@@ -200,6 +200,8 @@ private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean,
     var lists by remember { mutableStateOf(mapOf(
         Task.CHAT to initial.chatOrder, Task.IMAGE to initial.imageModels, Task.AUDIO to initial.audioModels, Task.VIDEO to initial.videoModels)) }
     var task by remember { mutableStateOf(Task.CHAT) }
+    var limits by remember { mutableStateOf(initial.limits) }
+    var limitFor by remember { mutableStateOf<String?>(null) }
     var models by remember { mutableStateOf<List<app.switchboard.net.ModelInfo>?>(null) }
     var detectNote by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
@@ -280,6 +282,10 @@ private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean,
                             Icon(Icons.Default.KeyboardArrowDown, "Move $id down") }
                         IconButton(onClick = { setChosen(chosen - id) }) { Icon(Icons.Default.Close, "Remove $id") }
                     }
+                    val lim = limits[id]
+                    TextButton(onClick = { limitFor = id }, modifier = Modifier.padding(start = 20.dp)) {
+                        Text("⏱ " + (lim?.takeIf { it.isSet }?.label() ?: "No request limit"), style = MaterialTheme.typography.labelMedium)
+                    }
                 }
 
                 OutlinedTextField(query, { query = it }, label = { Text("Search models") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -315,12 +321,37 @@ private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean,
         confirmButton = {
             TextButton(enabled = valid, onClick = {
                 val chat = lists[Task.CHAT].orEmpty()
-                onSave(draft().copy(model = chat.firstOrNull() ?: initial.model, chatModels = chat,
+                val used = lists.values.flatten().toSet()
+                onSave(draft().copy(model = chat.firstOrNull() ?: initial.model, chatModels = chat, limits = limits.filter { (k, v) -> k in used && v.isSet },
                     imageModels = lists[Task.IMAGE].orEmpty(), audioModels = lists[Task.AUDIO].orEmpty(), videoModels = lists[Task.VIDEO].orEmpty()))
             }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+    limitFor?.let { id -> ModelLimitDialog(id, limits[id] ?: app.switchboard.data.ModelLimit(), onDismiss = { limitFor = null }) { limits = limits + (id to it); limitFor = null } }
+}
+
+/** Per-minute and per-day request limits for one model (blank = no limit). */
+@Composable
+private fun ModelLimitDialog(model: String, initial: app.switchboard.data.ModelLimit, onDismiss: () -> Unit, onSave: (app.switchboard.data.ModelLimit) -> Unit) {
+    var perMin by remember { mutableStateOf(if (initial.perMinute > 0) initial.perMinute.toString() else "") }
+    var perDay by remember { mutableStateOf(if (initial.perDay > 0) initial.perDay.toString() else "") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Request limits") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(model, style = MaterialTheme.typography.bodySmall)
+                Text("Shared by all chats and background tasks. Leave blank for no limit.", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(perMin, { perMin = it.filter(Char::isDigit).take(6) }, label = { Text("Per minute") }, singleLine = true,
+                        placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                    OutlinedTextField(perDay, { perDay = it.filter(Char::isDigit).take(7) }, label = { Text("Per day") }, singleLine = true,
+                        placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(app.switchboard.data.ModelLimit(perMin.toIntOrNull() ?: 0, perDay.toIntOrNull() ?: 0)) }) { Text("OK") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -431,30 +462,16 @@ private fun SetupStep(n: Int, text: String, done: Boolean) {
 private fun LimitsSection(vm: ChatViewModel) {
     val s = vm.settings
     Text("Request limits", style = MaterialTheme.typography.titleMedium)
-    Text("Shared by all chats; every model request counts, including each step of a tool run. When a limit is hit, the request waits and is sent automatically when the window opens. Leave blank for no limit.",
+    Text("Each model has its own per-minute and per-day limits: tap ⏱ next to a model when editing a provider. Limits are shared by all chats and background tasks. " +
+        "When a model hits its limit, the next model in its priority list is used; if there's none, the request waits and sends automatically.",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    var perMin by remember { mutableStateOf(if (s.maxPerMinute > 0) s.maxPerMinute.toString() else "") }
-    var perDay by remember { mutableStateOf(if (s.maxPerDay > 0) s.maxPerDay.toString() else "") }
-    fun save() = vm.setRateLimits(perMin.toIntOrNull() ?: 0, perDay.toIntOrNull() ?: 0)
-    FRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(perMin, { perMin = it.filter(Char::isDigit).take(6); save() }, label = { Text("Per minute") }, singleLine = true,
-            placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-        OutlinedTextField(perDay, { perDay = it.filter(Char::isDigit).take(7); save() }, label = { Text("Per day") }, singleLine = true,
-            placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-    }
-    Text("Daily limit resets", style = MaterialTheme.typography.labelMedium)
+    Text("Daily limits reset", style = MaterialTheme.typography.labelMedium)
     val resets = listOf(DailyReset.MIDNIGHT to "At midnight", DailyReset.ROLLING to "Rolling 24 hours")
     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
         resets.forEachIndexed { i, (r, label) ->
             SegmentedButton(selected = s.dailyReset == r, onClick = { vm.setDailyReset(r) }, shape = SegmentedButtonDefaults.itemShape(i, resets.size)) { Text(label) }
         }
     }
-    var usage by remember { mutableStateOf(vm.usage()) }
-    LaunchedEffect(s.dailyReset, s.timeZone) { while (true) { usage = vm.usage(); kotlinx.coroutines.delay(1000) } }
-    Text("Used: ${usage.lastMinute}${if (s.maxPerMinute > 0) " / ${s.maxPerMinute}" else ""} in the last minute · " +
-        "${usage.today}${if (s.maxPerDay > 0) " / ${s.maxPerDay}" else ""} " +
-        if (s.dailyReset == DailyReset.MIDNIGHT) "today (resets at midnight, ${vm.zone.id})" else "in the last 24 hours",
-        style = MaterialTheme.typography.bodySmall)
 
     Spacer(Modifier.size(16.dp))
     Text("Time zone", style = MaterialTheme.typography.titleMedium)

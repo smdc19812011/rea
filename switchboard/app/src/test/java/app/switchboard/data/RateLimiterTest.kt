@@ -47,3 +47,22 @@ class RateLimiterTest {
         repeat(500) { assertNull(l.tryAcquire(lim)) }
     }
 }
+
+class PerModelLimitTest {
+    @org.junit.Test fun eachModelHasItsOwnCountAndPersists() {
+        var now = 1_800_000_000_000L
+        val f = java.io.File.createTempFile("limits", ".tsv").apply { delete() }
+        val zone = java.time.ZoneId.of("UTC")
+        val a = RateLimiter.Limits(1, 0, DailyReset.MIDNIGHT, zone)
+        val l = RateLimiter(f) { now }
+        org.junit.Assert.assertNull(l.tryAcquire(RateLimiter.key("p", "model-a"), a))
+        org.junit.Assert.assertNotNull(l.tryAcquire(RateLimiter.key("p", "model-a"), a)) // model-a is at its limit…
+        org.junit.Assert.assertNull(l.tryAcquire(RateLimiter.key("p", "model-b"), a))     // …model-b still has its own allowance
+        org.junit.Assert.assertTrue(l.isBlocked(RateLimiter.key("p", "model-a"), a))
+        val reopened = RateLimiter(f) { now }                                              // counts survive a restart
+        org.junit.Assert.assertEquals(1, reopened.usage(RateLimiter.key("p", "model-b"), a).lastMinute)
+        now += 61_000
+        org.junit.Assert.assertNull(reopened.tryAcquire(RateLimiter.key("p", "model-a"), a))
+        f.delete()
+    }
+}

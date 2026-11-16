@@ -22,6 +22,8 @@ data class Provider(
     val imageModels: List<String> = emptyList(),
     val audioModels: List<String> = emptyList(),
     val videoModels: List<String> = emptyList(),
+    /** Request limits per model ID (shared by all chats). Models without an entry are unlimited. */
+    val limits: Map<String, ModelLimit> = emptyMap(),
 ) {
     /** Chat models to try, current first, then the rest of the priority list. */
     val chatOrder: List<String> get() = (listOf(model) + chatModels).filter { it.isNotBlank() }.distinct()
@@ -53,6 +55,13 @@ data class ToolPackage(
     /** Install results per machine (PHONE, TERMUX, REMOTE). */
     val installs: Map<String, InstallState> = emptyMap(),
 )
+
+/** Requests allowed for one model; 0 = no limit. */
+@Serializable
+data class ModelLimit(val perMinute: Int = 0, val perDay: Int = 0) {
+    val isSet get() = perMinute > 0 || perDay > 0
+    fun label() = listOfNotNull("$perMinute/min".takeIf { perMinute > 0 }, "$perDay/day".takeIf { perDay > 0 }).joinToString(" · ").ifEmpty { "no limit" }
+}
 
 /** What a task needs from a model. */
 @Serializable

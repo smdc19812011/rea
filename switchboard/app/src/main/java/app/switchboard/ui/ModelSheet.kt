@@ -66,7 +66,14 @@ fun ModelSheet(vm: ChatViewModel, onDismiss: () -> Unit, onEditProviders: () -> 
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("${i + 1}.", style = MaterialTheme.typography.labelLarge, modifier = Modifier.size(width = 28.dp, height = 20.dp))
-                        Text(id, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Column(Modifier.weight(1f)) {
+                            Text(id, style = MaterialTheme.typography.bodyMedium)
+                            val (lim, used) = vm.usageFor(provider, id)
+                            if (lim.isSet) Text(listOfNotNull(
+                                "${(lim.perMinute - used.lastMinute).coerceAtLeast(0)}/${lim.perMinute} left this min".takeIf { lim.perMinute > 0 },
+                                "${(lim.perDay - used.today).coerceAtLeast(0)}/${lim.perDay} left 24hr".takeIf { lim.perDay > 0 }).joinToString(" · "),
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         if (id == provider.model) Icon(Icons.Default.Check, "In use", tint = MaterialTheme.colorScheme.primary)
                     }
                 }

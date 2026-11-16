@@ -103,11 +103,10 @@ Everything below is in **Settings**, at the top of the page.
 - **Scheduled tasks**: once, every N hours, daily or weekly, in your time zone, with an optional project and agent. Runs use Android's background job scheduler, so they work with the app closed. Each run is saved as a chat and you get a notification. Tools and connectors run without asking only if you turn on "Allow tools and connectors" for that task. With Tools on, the model can schedule tasks too (`schedule_task`).
 
 ## Request limits and time zone
-- **Per minute / per day** (Settings, then Request limits; blank means no limit) are shared by all chats and saved on the device. Every model request counts, including each step of a tool run.
-- When a limit is hit, the request waits and is sent automatically when the window opens. A countdown shows above the message box, and Stop cancels it. The app has to stay open during a long daily wait.
-- Remaining requests show under the message box, lower right (for example `4/5 remaining min   96/100 remaining 24hr`). They turn red when a limit is used up, and are hidden when no limit is set.
-- The daily limit resets **at midnight** in your time zone, or on a **rolling 24 hours**.
-- **Time zone**: device default or any IANA zone. It's used for the midnight reset and to tell the model your local date and time.
+- **Per-model limits**: edit a provider and tap ⏱ under a chosen model to set its requests per minute and per day (blank means no limit). Counts are shared by all chats and background tasks, and survive restarts.
+- When a model hits its limit and another model is next in that task's priority list, the request moves on straight away; otherwise it waits and sends automatically (with a countdown above the message box).
+- The counter under the message box shows the remaining requests for the model in use, and the model menu shows them for each model.
+- Settings keeps how daily limits reset (**at midnight** in your time zone, or **rolling 24 hours**) and the **time zone**, which is also used to tell the model your local date and time.
 
 ## Unrestricted mode
 This switch in Settings asks you to confirm before it turns on. It lifts the app's own limits:

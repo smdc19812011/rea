@@ -16,7 +16,7 @@ class Store(context: Context) {
     fun loadSettings(): AppSettings {
         val raw = runCatching { json.decodeFromString<AppSettings>(settingsFile.readText()) }.getOrNull()
             ?: return AppSettings()
-        return raw.copy(
+        return migrateLimits(raw).let { raw -> raw.copy(
             // Older versions stored only one model: make it the first chat choice.
             providers = raw.providers.map { p ->
                 p.copy(apiKey = SecretBox.decrypt(p.apiKey), chatModels = p.chatModels.ifEmpty { listOfNotNull(p.model.takeIf { it.isNotBlank() }) })
@@ -25,7 +25,17 @@ class Store(context: Context) {
             termuxToken = SecretBox.decrypt(raw.termuxToken),
             connectors = raw.connectors.map { it.copy(auth = it.auth.mapSecrets(SecretBox::decrypt)) },
             packages = raw.packages.map { it.copy(token = SecretBox.decrypt(it.token)) },
-        )
+        ) }
+    }
+
+    /** Older versions had one limit for everything: give each chosen model that limit, then clear the global one. */
+    private fun migrateLimits(s: AppSettings): AppSettings {
+        if (s.maxPerMinute <= 0 && s.maxPerDay <= 0) return s
+        val l = ModelLimit(s.maxPerMinute, s.maxPerDay)
+        return s.copy(maxPerMinute = 0, maxPerDay = 0, providers = s.providers.map { p ->
+            val models = (p.chatOrder + p.imageModels + p.audioModels + p.videoModels).distinct()
+            p.copy(limits = models.associateWith { l } + p.limits)
+        })
     }
 
     fun saveSettings(s: AppSettings) {

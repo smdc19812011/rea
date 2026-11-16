@@ -13,9 +13,9 @@ import kotlinx.coroutines.delay
 
 /**
  * Runs the model + tool loop without a screen: used for sub-agents (run_agent) and scheduled tasks.
- * Returns only the messages it added. [beforeRequest] applies the shared rate limits.
+ * Returns only the messages it added. [beforeRequest] applies the model's request limits.
  */
-class AgentRunner(private val client: ChatClient, private val beforeRequest: suspend () -> Unit) {
+class AgentRunner(private val client: ChatClient, private val beforeRequest: suspend (Provider) -> Unit) {
     suspend fun run(
         provider: Provider, opts: RequestOptions, history: List<ChatMessage>,
         execute: suspend (ToolCall) -> ToolResult, maxSteps: Int = 15, onProgress: (String) -> Unit = {},
@@ -41,7 +41,7 @@ class AgentRunner(private val client: ChatClient, private val beforeRequest: sus
         val backoff = listOf(3_000L, 10_000L, 30_000L)
         var attempt = 0
         while (true) {
-            beforeRequest()
+            beforeRequest(provider)
             try {
                 var end: StreamEvent.TurnEnd? = null
                 client.stream(provider, msgs, opts).collect { if (it is StreamEvent.TurnEnd) end = it }

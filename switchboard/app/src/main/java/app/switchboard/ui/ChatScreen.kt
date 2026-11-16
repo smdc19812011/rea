@@ -148,17 +148,19 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
                     Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            // Remaining requests under the shared limits, refreshed every second; hidden when no limit is set.
+            // Remaining requests for the model in use (its own limits), refreshed every second; hidden when it has no limit.
             val st = vm.settings
-            var usage by remember { mutableStateOf(vm.usage()) }
-            LaunchedEffect(st.maxPerMinute, st.maxPerDay, st.dailyReset, st.timeZone) { while (true) { usage = vm.usage(); kotlinx.coroutines.delay(1000) } }
-            val minLeft = (st.maxPerMinute - usage.lastMinute).coerceAtLeast(0)
-            val dayLeft = (st.maxPerDay - usage.today).coerceAtLeast(0)
-            val footer = listOfNotNull(
-                "$minLeft/${st.maxPerMinute} remaining min".takeIf { st.maxPerMinute > 0 },
-                "$dayLeft/${st.maxPerDay} remaining 24hr".takeIf { st.maxPerDay > 0 },
+            val chatProvider = vm.providerFor(vm.currentAgent)
+            var info by remember { mutableStateOf(chatProvider?.let { vm.usageFor(it) }) }
+            LaunchedEffect(chatProvider, st.dailyReset, st.timeZone) { while (true) { info = chatProvider?.let { vm.usageFor(it) }; kotlinx.coroutines.delay(1000) } }
+            val lim = info?.first; val used = info?.second
+            val minLeft = if (lim != null && used != null) (lim.perMinute - used.lastMinute).coerceAtLeast(0) else 0
+            val dayLeft = if (lim != null && used != null) (lim.perDay - used.today).coerceAtLeast(0) else 0
+            val footer = if (lim == null) null else listOfNotNull(
+                "$minLeft/${lim.perMinute} remaining min".takeIf { lim.perMinute > 0 },
+                "$dayLeft/${lim.perDay} remaining 24hr".takeIf { lim.perDay > 0 },
             ).joinToString("   ").ifEmpty { null }
-            val exhausted = (st.maxPerMinute > 0 && minLeft == 0) || (st.maxPerDay > 0 && dayLeft == 0)
+            val exhausted = lim != null && ((lim.perMinute > 0 && minLeft == 0) || (lim.perDay > 0 && dayLeft == 0))
             Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop, footer = footer, footerWarn = exhausted, imageButton = vm.settings.fileTools)
         }
     }

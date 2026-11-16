@@ -79,7 +79,7 @@ import kotlinx.coroutines.withContext
 
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val store = Store(app)
-    private val limiter = RateLimiter(File(app.filesDir, "request_times.csv"))
+    private val limiter = RateLimiter(File(app.filesDir, "request_limits.tsv"))
     private val client = ChatClient()
 
     var settings by mutableStateOf(AppSettings()); private set
@@ -284,29 +284,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Streams one model turn into a new assistant message. Returns its tool calls, or null if it failed/was stopped. */
     val zone: ZoneId get() = runCatching { if (settings.timeZone.isBlank()) null else ZoneId.of(settings.timeZone) }.getOrNull() ?: ZoneId.systemDefault()
 
-    private fun limits() = RateLimiter.Limits(settings.maxPerMinute, settings.maxPerDay, settings.dailyReset, zone)
+    private fun limitOf(p: Provider, model: String) = p.limits[model] ?: app.switchboard.data.ModelLimit()
+    private fun limitsFor(p: Provider, model: String) = limitOf(p, model).let { RateLimiter.Limits(it.perMinute, it.perDay, settings.dailyReset, zone) }
 
-    fun usage(): RateLimiter.Usage = limiter.usage(limits())
+    /** Requests used by [model] on [p] (shared by all chats), with its limits. */
+    fun usageFor(p: Provider, model: String = p.model): Pair<app.switchboard.data.ModelLimit, RateLimiter.Usage> =
+        limitOf(p, model) to limiter.usage(RateLimiter.key(p.id, model), limitsFor(p, model))
 
     /**
-     * Waits until the shared per-minute/per-day limits allow another request, then counts it.
-     * Re-checks every second, so changing the limits in Settings takes effect right away. Stop cancels the wait.
+     * Counts one request for [model]. If it has reached its limit: returns false at once when [canSkip] (the caller moves on
+     * to the next model), otherwise waits until the window opens. Re-checks every second, so edited limits apply right away.
      */
-    private suspend fun awaitRateLimit() {
+    private suspend fun awaitRateLimit(p: Provider, model: String = p.model, canSkip: Boolean = false): Boolean {
+        val key = RateLimiter.key(p.id, model)
         try {
             while (true) {
-                val w = limiter.tryAcquire(limits()) ?: return
+                val current = settings.providers.firstOrNull { it.id == p.id } ?: p
+                val l = limitOf(current, model)
+                val w = limiter.tryAcquire(key, limitsFor(current, model)) ?: return true
+                if (canSkip) return false
                 val left = w.untilMs - System.currentTimeMillis()
                 toolStatus = when (w.scope) {
-                    RateLimiter.Scope.MINUTE -> "Limit of ${settings.maxPerMinute} requests per minute reached. Sending in ${(left + 999) / 1000} s…"
+                    RateLimiter.Scope.MINUTE -> "$model: limit of ${l.perMinute} requests per minute reached. Sending in ${(left + 999) / 1000} s…"
                     RateLimiter.Scope.DAY -> {
                         val at = ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(w.untilMs), zone)
-                        "Daily limit of ${settings.maxPerDay} requests reached. Sending at ${at.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))} (${zone.id}). Keep the app open."
+                        "$model: daily limit of ${l.perDay} requests reached. Sending at ${at.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))} (${zone.id}). Keep the app open."
                     }
                 }
                 delay(left.coerceIn(200, 1000))
             }
-        } finally { toolStatus = null }
+        } finally { if (!canSkip) toolStatus = null }
     }
 
     private class TurnResult(val calls: List<ToolCall>, val provider: Provider)
@@ -325,6 +332,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             var attempt = 0
             var keep: Int? = null
             while (true) {
+                if (!awaitRateLimit(p, model, canSkip = canSwitch)) {
+                    toolStatus = "$model reached its request limit. Using ${models[index + 1]}…"
+                    delay(800); toolStatus = null
+                    break
+                }
                 when (val r = attemptTurn(p, opts, finalAttempt = attempt >= backoff.size, keepLast = keep, canSwitch = canSwitch)) {
                     is TurnOutcome.Done -> return TurnResult(r.calls, p)
                     is TurnOutcome.Failed -> return null
@@ -375,7 +387,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun attemptTurn(provider: Provider, opts0: RequestOptions, finalAttempt: Boolean, keepLast: Int? = null, canSwitch: Boolean = false): TurnOutcome {
         var opts = if (provider.model in noToolModels && opts0.tools.isNotEmpty())
             opts0.copy(tools = emptyList(), system = opts0.system + "\n\nTools aren't available with this model, so answer directly.") else opts0
-        awaitRateLimit()
         val full = current.messages
         // Too long for this model: send only the most recent part, starting at a user message.
         val history = if (keepLast == null || keepLast >= full.size) full else {
@@ -756,12 +767,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private fun mediaProvider(): Provider? = providerFor(currentAgent)?.takeIf { it.kind == ApiKind.OPENAI_COMPATIBLE }
 
     /** Tries [models] in order; returns the first success, or throws with every model's reason. */
-    private suspend fun <T> firstThatWorks(models: List<String>, what: String, attempt: suspend (String) -> T): Pair<T, String> {
+    private suspend fun <T> firstThatWorks(p: Provider, models: List<String>, what: String, attempt: suspend (String) -> T): Pair<T, String> {
         if (models.isEmpty()) error("No $what models are chosen. Open Settings, edit the provider, and pick $what models.")
         val errors = mutableListOf<String>()
-        for (m in models.take(8)) {
+        val list = models.take(8)
+        for ((i, m) in list.withIndex()) {
+            if (!awaitRateLimit(p, m, canSkip = i < list.lastIndex)) { errors += "• $m: request limit reached"; continue }
             toolStatus = "Making $what with $m…"
-            awaitRateLimit()
             try { return attempt(m) to m } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { errors += "• $m: ${e.message?.take(200)}" }
         }
         error("No model could make the $what:\n" + errors.joinToString("\n") + "\nAdd or reorder $what models in Settings > provider.")
@@ -775,7 +787,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val p = mediaProvider() ?: error("Images need an OpenAI-compatible provider such as OpenRouter or OpenAI; Anthropic models can't make images.")
         val candidates = (listOf(p.model) + p.imageModels + (if (p.imageModels.isEmpty()) p.chatModels else emptyList())).filter { it.isNotBlank() }.distinct()
         try {
-            val (result, model) = firstThatWorks(candidates, "image") { m -> MediaGen().image(p, m, prompt, settings.unrestricted) }
+            val (result, model) = firstThatWorks(p, candidates, "image") { m -> MediaGen().image(p, m, prompt, settings.unrestricted) }
             val atts = withContext(Dispatchers.IO) { saveAll(result.first, filename ?: "image-${System.currentTimeMillis() / 1000}") }
             return Triple(atts, result.second, model)
         } finally { toolStatus = null }
@@ -784,7 +796,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun makeVideo(prompt: String, filename: String? = null): Triple<List<Attachment>, String, String> {
         val p = mediaProvider() ?: error("Videos need an OpenAI-compatible provider.")
         try {
-            val (file, model) = firstThatWorks(p.videoModels, "video") { m -> MediaGen().video(p, m, prompt, settings.unrestricted) { toolStatus = "$m: $it" } }
+            val (file, model) = firstThatWorks(p, p.videoModels, "video") { m -> MediaGen().video(p, m, prompt, settings.unrestricted) { toolStatus = "$m: $it" } }
             val atts = withContext(Dispatchers.IO) { saveAll(listOf(file), filename ?: "video-${System.currentTimeMillis() / 1000}") }
             return Triple(atts, "", model)
         } finally { toolStatus = null }
@@ -853,7 +865,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val p = mediaProvider()
         if (p != null && p.audioModels.isNotEmpty()) {
             val prev = toolStatus
-            val viaModel = runCatching { firstThatWorks(p.audioModels, "audio") { m -> MediaGen().audio(p, m, text, a.str("voice") ?: "alloy", settings.unrestricted) } }
+            val viaModel = runCatching { firstThatWorks(p, p.audioModels, "audio") { m -> MediaGen().audio(p, m, text, a.str("voice") ?: "alloy", settings.unrestricted) } }
                 .also { toolStatus = prev }
             viaModel.getOrNull()?.let { (file, model) ->
                 val name = a.str("filename")?.substringBeforeLast('.')?.ifBlank { null } ?: "audio-${System.currentTimeMillis() / 1000}"
@@ -909,7 +921,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val prevStatus = toolStatus
         return try {
             val opts = buildOptions(agent, allowAgents = false)
-            val added = AgentRunner(client) { awaitRateLimit() }.run(provider, opts,
+            val added = AgentRunner(client) { pr -> awaitRateLimit(pr) }.run(provider, opts,
                 listOf(ChatMessage(role = Role.USER, text = a.str("task").orEmpty())), execute = { runTool(it) }, maxSteps = 20,
                 onProgress = { toolStatus = "${agent.name}: $it" })
             ToolResult("${agent.name} (${provider.model}) answered:\n${added.finalText()}", isError = added.lastOrNull()?.isError == true,
@@ -1046,7 +1058,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun setToolsEnabled(v: Boolean) = updateSettings { it.copy(toolsEnabled = v) }
     fun setRunner(url: String, token: String) = updateSettings { it.copy(runnerUrl = url.trim(), runnerToken = token.trim()) }
     fun setAskBeforeRun(v: Boolean) = updateSettings { it.copy(askBeforeRun = v) }
-    fun setRateLimits(perMinute: Int, perDay: Int) = updateSettings { it.copy(maxPerMinute = perMinute.coerceAtLeast(0), maxPerDay = perDay.coerceAtLeast(0)) }
     fun setDailyReset(v: DailyReset) = updateSettings { it.copy(dailyReset = v) }
     fun setTimeZone(id: String) { updateSettings { it.copy(timeZone = id) }; Scheduler.sync(getApplication(), settings) }
 
