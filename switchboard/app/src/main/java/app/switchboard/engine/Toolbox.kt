@@ -3,6 +3,7 @@ package app.switchboard.engine
 import app.switchboard.data.PackageKind
 import app.switchboard.data.RunnerMode
 import app.switchboard.data.ToolPackage
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -15,6 +16,23 @@ import java.util.zip.ZipInputStream
  * the workspace's tools/ folder on the phone.
  */
 object Toolbox {
+    const val INSTALL_TOOL = "install_tool"
+
+    val installToolSpec = app.switchboard.net.ToolSpec(INSTALL_TOOL,
+        "Install a tool, driver, SDK, library or repository permanently on the tool machine and add it to the user's Toolbox, so every future chat, " +
+            "project, agent and scheduled task can use it without downloading again. Check the Toolbox list in the system prompt first.",
+        kotlinx.serialization.json.buildJsonObject {
+            put("type", "object")
+            put("properties", kotlinx.serialization.json.buildJsonObject {
+                fun p(n: String, d: String) = put(n, kotlinx.serialization.json.buildJsonObject { put("type", "string"); put("description", d) })
+                p("name", "Short name, e.g. Android platform tools")
+                p("source", "Package name (pkg/apt), pip:name, npm:name, git repo URL, download URL, or an install script")
+                p("type", "Optional: package, pip, npm, git, url or script (default: detected from source)")
+                p("description", "What it is, shown to future chats")
+            })
+            put("required", kotlinx.serialization.json.JsonArray(listOf("name", "source").map { kotlinx.serialization.json.JsonPrimitive(it) }))
+        })
+
     private val gitHost = Regex("^https?://(www\\.)?(github\\.com|gitlab\\.com|bitbucket\\.org|codeberg\\.org)/[^/\\s]+/[^/\\s]+?(\\.git)?/?$", RegexOption.IGNORE_CASE)
 
     fun kindOf(p: ToolPackage): PackageKind = if (p.kind != PackageKind.AUTO) p.kind else detect(p.source)
@@ -191,6 +209,13 @@ object Toolbox {
             "mkdir -p \$HOME/switchboard-tools/bin && curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=\$HOME/switchboard-tools/bin sh && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\"",
             "[ -x \$HOME/switchboard-tools/bin/arduino-cli ] && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\"",
             "[ -x \$HOME/switchboard-tools/bin/arduino-cli ] && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\""),
+        pkg("Android platform tools", "adb (incl. adb pair for Android 11+ wireless debugging) and fastboot", "android-tools", "adb fastboot", "adb"),
+        pkg("Network tools", "nmap, netcat, dig, traceroute for finding and testing devices on your network",
+            "nmap netcat-openbsd dnsutils traceroute", "nmap netcat-openbsd dnsutils traceroute", "nmap"),
+        preset("Termux:API USB access", "termux-usb and libusb so programs in Termux can open USB devices (also install the Termux:API app from F-Droid)",
+            "pkg install -y termux-api libusb && echo \"LOCATION=\$(command -v termux-usb)\"", null,
+            "command -v termux-usb >/dev/null && echo \"LOCATION=\$(command -v termux-usb)\"", null),
+        pkg("USB utilities", "lsusb and usb-devices for inspecting USB hardware", "usbutils", "usbutils", "lsusb"),
         ToolPackage(name = "rea (GitHub)", description = "smdc19812011/rea repository", kind = PackageKind.GIT, source = "https://github.com/smdc19812011/rea"),
     ).filter { p -> mode == RunnerMode.PHONE && kindOf(p) in setOf(PackageKind.GIT, PackageKind.URL) || mode != RunnerMode.PHONE && installScript(p, mode) != null }
 

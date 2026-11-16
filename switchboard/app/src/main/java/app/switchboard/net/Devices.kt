@@ -93,7 +93,8 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
         const val CLOSE = "device_close"
         const val HTTP = "http_request"
         const val DOWNLOAD = "download_file"
-        val names = setOf(LIST, CONNECT, WRITE, READ, CLOSE, HTTP, DOWNLOAD)
+        const val ADB = "adb"
+        val names = setOf(LIST, CONNECT, WRITE, READ, CLOSE, HTTP, DOWNLOAD, ADB)
         /** Read-only or cleanup actions that don't need the user's approval. */
         val noApproval = setOf(LIST, READ, CLOSE)
         private val SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
@@ -117,8 +118,10 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
             ToolSpec(CONNECT, "Open a connection and get a handle for device_write/device_read. Types: " +
                 "usb_serial (id = USB device name from list_devices; options baud, default 115200; driver auto, cdc, cp210x, ch34x or ftdi), " +
                 "usb_raw (id = USB device name; options interface, default 0), bt_serial (Classic Bluetooth SPP; id = MAC address), " +
-                "ble (id = MAC; returns services and characteristics), tcp (id = host:port), udp (id = host:port; broadcast allowed).",
-                obj(listOf("type", "id"), "type" to s("usb_serial, usb_raw, bt_serial, ble, tcp or udp"), "id" to s("Device name, MAC address or host:port"),
+                "ble (id = MAC; returns services and characteristics), tcp (id = host:port), udp (id = host:port; broadcast allowed), " +
+                "usb_hid (id = USB device name; HID keyboards, controllers, scanners, custom HID boards: read input reports, write output reports; shows the report descriptor), " +
+                "bt_keyboard (this phone acts as a Bluetooth keyboard for a paired computer/TV; id = its MAC, or empty to wait for the computer to connect; device_write types the text, with {ENTER} {TAB} {BACKSPACE} {ESC} {UP} {DOWN} {LEFT} {RIGHT}).",
+                obj(listOf("type", "id"), "type" to s("usb_serial, usb_raw, usb_hid, bt_serial, ble, bt_keyboard, tcp or udp"), "id" to s("Device name, MAC address or host:port"),
                     "baud" to i("usb_serial baud rate, default 115200"), "driver" to s("usb_serial: auto (default), cdc, cp210x, ch34x, ftdi"),
                     "interface" to i("usb_raw interface index, default 0"))),
             ToolSpec(WRITE, "Send bytes to an open device. For BLE, target is the characteristic UUID (or service/characteristic).",
@@ -133,14 +136,22 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
                 obj(listOf("url"), "url" to s("Full URL"), "method" to s("GET (default), POST, PUT, PATCH, DELETE"),
                     "headers" to buildJsonObject { put("type", "object"); put("description", "Header name to value") },
                     "body" to s("Request body text"))),
+            ToolSpec(ADB, "Built-in ADB client (works in every mode, no install needed): control another Android device over the network. " +
+                "The device needs ADB over TCP enabled (port 5555: Android TV/Fire TV/emulators, rooted devices, or any phone after `adb tcpip 5555` from a computer). " +
+                "The first time, the device asks to allow this phone. Actions: shell (run a command), push (copy a file from the tool machine), install (an .apk from the tool machine), disconnect.",
+                obj(listOf("target", "action"), "target" to s("IP or host, optionally :port (default 5555)"), "action" to s("shell, push, install or disconnect"),
+                    "command" to s("shell: the command to run on the device"), "local_path" to s("push/install: file on the tool machine"),
+                    "remote_path" to s("push: destination on the device, e.g. /sdcard/Download/file.txt"))),
             if (includeDownload) ToolSpec(DOWNLOAD, "Download a file from a URL into the phone workspace (up to 500 MB). " +
                 "Android doesn't let apps execute downloaded programs, so use this for data, firmware, archives and files to send_file.",
                 obj(listOf("url", "path"), "url" to s("https:// URL"), "path" to s("Destination path in the workspace"))) else null,
         )
     }
 
-    /** Runs a device tool. [workspace] is where download_file saves (phone mode). */
-    suspend fun execute(call: ToolCall, workspace: File, unrestricted: Boolean): ToolResult {
+    private val adbClients = ConcurrentHashMap<String, AdbClient>()
+
+    /** Runs a device tool. [workspace] is where download_file saves (phone mode); [fetch] copies a file from the tool machine. */
+    suspend fun execute(call: ToolCall, workspace: File, unrestricted: Boolean, fetch: suspend (String, File) -> Unit = { p, d -> File(p).copyTo(d, true) }): ToolResult {
         val a = runCatching { json.parseToJsonElement(call.arguments).jsonObject }.getOrElse { return ToolResult("Arguments were not valid JSON.", true) }
         return try {
             when (call.name) {
@@ -158,6 +169,7 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
                 CLOSE -> { sessions.remove(a.str("handle"))?.close(); ToolResult("Closed.") }
                 HTTP -> http(a, unrestricted)
                 DOWNLOAD -> download(a, workspace)
+                ADB -> adb(a, fetch)
                 else -> ToolResult("Unknown device tool ${call.name}", true)
             }
         } catch (e: kotlinx.coroutines.CancellationException) { throw e
@@ -165,7 +177,43 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
         } catch (e: Exception) { ToolResult(e.message ?: e.javaClass.simpleName, true) }
     }
 
-    fun closeAll() { sessions.values.forEach { runCatching { it.close() } }; sessions.clear() }
+    fun closeAll() {
+        sessions.values.forEach { runCatching { it.close() } }; sessions.clear()
+        adbClients.values.forEach { it.close() }; adbClients.clear()
+    }
+
+    private suspend fun adb(a: JsonObject, fetch: suspend (String, File) -> Unit): ToolResult = withContext(Dispatchers.IO) {
+        val target = a.str("target")?.trim()?.ifBlank { null } ?: return@withContext ToolResult("Missing 'target' (IP or host[:port]).", true)
+        val host = target.substringBeforeLast(':').takeIf { ':' in target && target.substringAfterLast(':').all(Char::isDigit) } ?: target
+        val port = if (host != target) target.substringAfterLast(':').toInt() else 5555
+        val key = "$host:$port"
+        if (a.str("action") == "disconnect") { adbClients.remove(key)?.close(); return@withContext ToolResult("Disconnected from $key.") }
+        val client = adbClients[key]?.takeIf { it.isConnected } ?: AdbClient(File(ctx.filesDir, "keys/adbkey.pk8")).also {
+            it.connect(host, port) // first time: the device shows "Allow USB debugging?" and we wait for it
+            adbClients[key] = it
+        }
+        fun local(): File {
+            val path = a.str("local_path") ?: throw IllegalArgumentException("Missing 'local_path'.")
+            val f = File(ctx.cacheDir, "adb/${File(path).name}")
+            kotlinx.coroutines.runBlocking { fetch(path, f) }
+            return f
+        }
+        try {
+            when (a.str("action")) {
+                "shell" -> ToolResult("${client.shell(a.str("command") ?: return@withContext ToolResult("Missing 'command'.", true)).take(50_000).ifBlank { "(no output)" }}")
+                "push" -> {
+                    val f = local(); val remote = a.str("remote_path") ?: "/sdcard/Download/${f.name}"
+                    client.push(f.readBytes(), remote); f.delete()
+                    ToolResult("Pushed ${f.length()} bytes to $remote on $key.")
+                }
+                "install" -> { val f = local(); val out = client.install(f.readBytes(), f.name.replace(Regex("[^A-Za-z0-9._-]"), "_")); f.delete(); ToolResult(out, isError = !out.contains("Success")) }
+                else -> ToolResult("action must be shell, push, install or disconnect.", true)
+            }
+        } catch (e: Exception) {
+            adbClients.remove(key)?.close() // reconnect next time
+            ToolResult("ADB ${a.str("action")} failed on $key: ${e.message}", true)
+        }
+    }
 
     private fun session(a: JsonObject) = sessions[a.str("handle")] ?: throw IllegalArgumentException("No open device with handle '${a.str("handle")}'. Call device_connect first.")
 
@@ -274,11 +322,13 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
         val session: DeviceSession = when (a.str("type")) {
             "usb_serial" -> usbSerial(id, a.int("baud", 115200), a.str("driver") ?: "auto")
             "usb_raw" -> usbRaw(id, a.int("interface", 0))
+            "usb_hid" -> usbHid(id, a["interface"]?.let { a.int("interface", 0) })
+            "bt_keyboard" -> BtKeyboardSession.open(ctx, id.takeIf { it.isNotBlank() }?.let { adapterDevice(it) }, ::ensureBluetooth)
             "bt_serial" -> btSerial(id)
             "ble" -> BleSession.open(ctx, adapterDevice(id))
             "tcp" -> withContext(Dispatchers.IO) { TcpSession(hostPort(id)) }
             "udp" -> withContext(Dispatchers.IO) { UdpSession(hostPort(id)) }
-            else -> return ToolResult("Unknown type '${a.str("type")}'. Use usb_serial, usb_raw, bt_serial, ble, tcp or udp.", true)
+            else -> return ToolResult("Unknown type '${a.str("type")}'. Use usb_serial, usb_raw, usb_hid, bt_serial, ble, bt_keyboard, tcp or udp.", true)
         }
         return register(session)
     }
@@ -340,6 +390,20 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
         return UsbStreamSession(c, intf, inn, out, stripFtdi = false,
             summary = "Raw USB interface $iface (class ${intf.interfaceClass}), endpoints: " +
                 eps.joinToString { "${if (it.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT"} 0x%02X ${epType(it)} %dB".format(it.address, it.maxPacketSize) })
+    }
+
+    /** HID interface: input reports from the interrupt IN endpoint; output reports via interrupt OUT or SET_REPORT. */
+    private suspend fun usbHid(name: String, iface: Int?): DeviceSession {
+        val (d, c) = openUsb(name)
+        val intf = iface?.let { d.getInterface(it) } ?: (0 until d.interfaceCount).map { d.getInterface(it) }.firstOrNull { it.interfaceClass == UsbConstants.USB_CLASS_HID }
+            ?: run { c.close(); throw IllegalArgumentException("No HID interface on this device; try usb_raw.") }
+        if (!c.claimInterface(intf, true)) { c.close(); throw IllegalStateException("Couldn't claim the HID interface (Android may own it as a keyboard/mouse).") }
+        val eps = (0 until intf.endpointCount).map { intf.getEndpoint(it) }.filter { it.type == UsbConstants.USB_ENDPOINT_XFER_INT }
+        val desc = ByteArray(4096)
+        val n = c.controlTransfer(0x81, 0x06, 0x22 shl 8, intf.id, desc, desc.size, 1000) // GET_DESCRIPTOR (HID report)
+        val report = if (n > 0) desc.copyOf(n).toHex() else "unavailable"
+        return HidSession(c, intf, eps.firstOrNull { it.direction == UsbConstants.USB_DIR_IN }, eps.firstOrNull { it.direction == UsbConstants.USB_DIR_OUT },
+            "USB HID interface ${intf.id} (VID 0x%04X PID 0x%04X). Report descriptor (${n.coerceAtLeast(0)} bytes): $report".format(d.vendorId, d.productId))
     }
 
     private fun epType(e: UsbEndpoint) = when (e.type) { UsbConstants.USB_ENDPOINT_XFER_BULK -> "bulk"; UsbConstants.USB_ENDPOINT_XFER_INT -> "interrupt"; UsbConstants.USB_ENDPOINT_XFER_ISOC -> "isochronous"; else -> "control" }
@@ -485,6 +549,94 @@ private open class UsbStreamSession(
     }
 
     override fun close() { runCatching { c.releaseInterface(intf) }; c.close() }
+}
+
+/** HID: reads like a stream; writes go to the interrupt OUT endpoint, or SET_REPORT on the control pipe when there isn't one. */
+private class HidSession(private val conn: UsbDeviceConnection, private val iface: UsbInterface, inEp: UsbEndpoint?, private val outEp: UsbEndpoint?, summary: String) :
+    UsbStreamSession(conn, iface, inEp, outEp, stripFtdi = false, summary = summary) {
+    override suspend fun write(data: ByteArray, target: String?) {
+        if (outEp != null) return super.write(data, target)
+        val reportId = target?.toIntOrNull() ?: 0
+        val r = withContext(Dispatchers.IO) { conn.controlTransfer(0x21, 0x09, (0x02 shl 8) or reportId, iface.id, data, data.size, 2000) }
+        if (r < 0) throw IllegalStateException("SET_REPORT failed.")
+    }
+}
+
+/**
+ * This phone as a Bluetooth keyboard (HID device profile, Android 9+): types text on a paired computer, tablet or TV.
+ */
+@SuppressLint("MissingPermission")
+private class BtKeyboardSession private constructor(private val ctx: Context, private val hid: android.bluetooth.BluetoothHidDevice, private val host: BluetoothDevice) : DeviceSession {
+    override val summary = "Typing as a Bluetooth keyboard on ${host.name ?: host.address}. device_write sends text; device_close disconnects."
+
+    companion object {
+        private val DESCRIPTOR = byteArrayOf(0x05, 0x01, 0x09, 0x06, 0xA1.toByte(), 0x01, 0x85.toByte(), 0x01, 0x05, 0x07, 0x19, 0xE0.toByte(), 0x29, 0xE7.toByte(),
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95.toByte(), 0x08, 0x81.toByte(), 0x02, 0x95.toByte(), 0x01, 0x75, 0x08, 0x81.toByte(), 0x01,
+            0x95.toByte(), 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81.toByte(), 0x00, 0xC0.toByte())
+
+        suspend fun open(ctx: Context, target: BluetoothDevice?, ensure: suspend () -> Boolean): DeviceSession {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) throw IllegalStateException("Bluetooth keyboard mode needs Android 9 or newer.")
+            if (!ensure()) throw SecurityException("Bluetooth permission denied")
+            val adapter = ctx.getSystemService(BluetoothManager::class.java)?.adapter ?: throw IllegalStateException("No Bluetooth on this phone.")
+            val proxy = CompletableDeferred<android.bluetooth.BluetoothHidDevice>()
+            val ok = adapter.getProfileProxy(ctx, object : BluetoothProfile.ServiceListener {
+                override fun onServiceConnected(profile: Int, p: BluetoothProfile) { proxy.complete(p as android.bluetooth.BluetoothHidDevice) }
+                override fun onServiceDisconnected(profile: Int) {}
+            }, BluetoothProfile.HID_DEVICE)
+            if (!ok) throw IllegalStateException("This phone doesn't offer the Bluetooth keyboard (HID device) profile.")
+            val hid = withTimeoutOrNull(5000) { proxy.await() } ?: throw IllegalStateException("Bluetooth HID service didn't start.")
+            val registered = CompletableDeferred<Boolean>(); val connected = CompletableDeferred<BluetoothDevice>()
+            val sdp = android.bluetooth.BluetoothHidDeviceAppSdpSettings("Switchboard Keyboard", "Keyboard", "Switchboard",
+                android.bluetooth.BluetoothHidDevice.SUBCLASS1_KEYBOARD, DESCRIPTOR)
+            hid.registerApp(sdp, null, null, java.util.concurrent.Executors.newSingleThreadExecutor(), object : android.bluetooth.BluetoothHidDevice.Callback() {
+                override fun onAppStatusChanged(device: BluetoothDevice?, isRegistered: Boolean) { registered.complete(isRegistered) }
+                override fun onConnectionStateChanged(device: BluetoothDevice, state: Int) { if (state == BluetoothProfile.STATE_CONNECTED) connected.complete(device) }
+            })
+            if (withTimeoutOrNull(5000) { registered.await() } != true) { adapter.closeProfileProxy(BluetoothProfile.HID_DEVICE, hid); throw IllegalStateException("Couldn't register as a keyboard.") }
+            target?.let { hid.connect(it) }
+            val dev = withTimeoutOrNull(if (target != null) 20_000 else 90_000) { connected.await() } ?: run {
+                hid.unregisterApp(); adapter.closeProfileProxy(BluetoothProfile.HID_DEVICE, hid)
+                throw IllegalStateException(if (target != null) "The computer didn't accept the keyboard connection. Pair it with this phone first." else
+                    "No computer connected within 90 s. Keep this phone's Bluetooth settings open (so it's visible) and pair it from the computer, then try again.")
+            }
+            return BtKeyboardSession(ctx, hid, dev)
+        }
+
+        private val keys = mapOf("ENTER" to 0x28, "ESC" to 0x29, "BACKSPACE" to 0x2A, "TAB" to 0x2B, "RIGHT" to 0x4F, "LEFT" to 0x50, "DOWN" to 0x51, "UP" to 0x52, "DELETE" to 0x4C)
+        private const val SHIFT = 0x02
+        /** US layout: character -> (modifier, usage). */
+        fun keyFor(c: Char): Pair<Int, Int>? = when (c) {
+            in 'a'..'z' -> 0 to (0x04 + (c - 'a')); in 'A'..'Z' -> SHIFT to (0x04 + (c - 'A'))
+            in '1'..'9' -> 0 to (0x1E + (c - '1')); '0' -> 0 to 0x27
+            '\n' -> 0 to 0x28; '\t' -> 0 to 0x2B; ' ' -> 0 to 0x2C
+            else -> "!@#$%^&*()".indexOf(c).takeIf { it >= 0 }?.let { SHIFT to (0x1E + it) }
+                ?: "-=[]\\;'`,./".indexOf(c).takeIf { it >= 0 }?.let { 0 to intArrayOf(0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38)[it] }
+                ?: "_+{}|:\"~<>?".indexOf(c).takeIf { it >= 0 }?.let { SHIFT to intArrayOf(0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38)[it] }
+        }
+    }
+
+    private suspend fun press(mod: Int, usage: Int) {
+        hid.sendReport(host, 1, byteArrayOf(mod.toByte(), 0, usage.toByte(), 0, 0, 0, 0, 0)); delay(12)
+        hid.sendReport(host, 1, ByteArray(8)); delay(12)
+    }
+
+    override suspend fun write(data: ByteArray, target: String?) {
+        val text = data.decodeToString()
+        var i = 0
+        while (i < text.length) {
+            val m = Regex("^\\{([A-Z]+)\\}").find(text.substring(i))
+            if (m != null && keys[m.groupValues[1]] != null) { press(0, keys.getValue(m.groupValues[1])); i += m.value.length; continue }
+            keyFor(text[i])?.let { (mod, usage) -> press(mod, usage) }
+            i++
+        }
+    }
+
+    override suspend fun read(timeoutMs: Int, maxBytes: Int, target: String?) = ByteArray(0)
+
+    override fun close() {
+        runCatching { hid.disconnect(host) }; runCatching { hid.unregisterApp() }
+        ctx.getSystemService(BluetoothManager::class.java)?.adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hid)
+    }
 }
 
 /** User-space USB serial drivers for the common chip families. */

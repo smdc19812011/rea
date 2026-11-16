@@ -475,7 +475,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Extras.SCHEDULE_TASK -> scheduleTaskFromChat(argsOf(call))
             in connectorToolNames -> connectors.execute(call, settings.connectors, settings.unrestricted)
             Runner.INSTALL_APK -> installApk(call)
-            in DeviceManager.names -> devices.execute(call, File(getApplication<Application>().filesDir, "workspace"), settings.unrestricted)
+            in DeviceManager.names -> devices.execute(call, File(getApplication<Application>().filesDir, "workspace"), settings.unrestricted) { path, dest -> host().fetchFile(path, dest) }
+            Toolbox.INSTALL_TOOL -> installTool(argsOf(call))
             else -> host().execute(call)
         }
     }
@@ -606,6 +607,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val (note, specs) = machineTools()
             sys += note; tools += specs
             sys += Toolbox.note(settings.packages, settings.runnerMode)
+            tools += Toolbox.installToolSpec
             tools += listOf(Extras.createSkill, Extras.createAgent, Extras.scheduleTask)
             sys += "You can also save skills (create_skill), create agents (create_agent) and schedule prompts to run later or on repeat (schedule_task) when the user asks."
         }
@@ -651,8 +653,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             You can act with tools: run_command, write_file, read_file, install_apk (installs an .apk onto the user's phone; they tap Install), and send_file (puts any file into this chat so the user can open, save or share it; use it whenever they ask you to send or give them a file).
             $info
             $modeNote
-            Devices: list_devices finds USB devices, Bluetooth (Classic and BLE) and local-network services; device_connect opens usb_serial, usb_raw, bt_serial, ble, tcp or udp; then device_write/device_read exchange bytes (text, hex or base64), and http_request talks to web APIs and smart devices. These always run on the phone itself. Android apps can't install kernel drivers: USB serial chips (CDC-ACM, CP210x, CH34x, FTDI) have built-in drivers, and other USB devices are reachable with usb_raw, where you implement the protocol over bulk/interrupt transfers.
+            Devices: list_devices finds USB devices, Bluetooth (Classic and BLE) and local-network services; device_connect opens usb_serial, usb_raw, usb_hid, bt_serial, ble, bt_keyboard (this phone types on a computer), tcp or udp; then device_write/device_read exchange bytes (text, hex or base64), and http_request talks to web APIs and smart devices. These always run on the phone itself. Android apps can't install kernel drivers: USB serial chips (CDC-ACM, CP210x, CH34x, FTDI) have built-in drivers, and other USB devices are reachable with usb_raw, where you implement the protocol over bulk/interrupt transfers.
             You may download and install whatever tools a task needs (compilers, SDKs, libraries, CLIs) on the tool machine${if (settings.runnerMode == RunnerMode.PHONE) " — except that this phone sandbox can't run downloaded programs; download_file is for data and files only, so suggest Termux mode when real tools are needed" else ""}.
+            For other Android devices use the built-in adb tool (shell, push, install over the network); don't run adb through run_command unless the Toolbox lists Android platform tools.
+            When a task needs a tool, driver or library that isn't installed, use install_tool (not a one-off install) so it's kept in the Toolbox for every future chat, project, agent and task.
             Do the work yourself with these tools instead of telling the user to run commands: install missing packages, create files, build, fix errors, and retry.
             Keep commands non-interactive. Builds can take several minutes; set timeout_sec accordingly.
         """.trimIndent()
@@ -679,39 +683,58 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Installs (or updates) one tool on the current tool machine. */
     fun installPackage(id: String) {
-        val p = settings.packages.firstOrNull { it.id == id } ?: return
-        if (id in installing) return
+        if (id in installing || settings.packages.none { it.id == id }) return
+        viewModelScope.launch { installNow(id) }
+    }
+
+    /** Installs (or updates) one tool on the current tool machine and records the result. */
+    private suspend fun installNow(id: String): InstallState {
+        val p = settings.packages.firstOrNull { it.id == id } ?: return InstallState(System.currentTimeMillis(), false, "", "Not in the toolbox")
         installing = installing + (id to "Installing…")
         WorkService.start(getApplication(), "Installing ${p.name}")
-        viewModelScope.launch {
-            val state = try {
-                when (val mode = settings.runnerMode) {
-                    RunnerMode.PHONE -> withContext(Dispatchers.IO) {
-                        val dir = Toolbox.phoneInstall(p, File(getApplication<Application>().filesDir, "workspace/tools"))
-                        InstallState(System.currentTimeMillis(), true, dir.path, "Downloaded to ${dir.path}")
-                    }
-                    else -> {
-                        describeHost() // starts the Termux runner if needed
-                        var tokenFile: String? = null
-                        if (p.token.isNotBlank() && Toolbox.kindOf(p) in setOf(app.switchboard.data.PackageKind.GIT, app.switchboard.data.PackageKind.URL)) {
-                            tokenFile = ".switchboard-token-${p.id.take(8)}"
-                            host().execute(ToolCall("toolbox", "write_file", kotlinx.serialization.json.buildJsonObject {
-                                put("path", "~/$tokenFile"); put("content", Toolbox.authHeader(p.token))
-                            }.toString()))
-                            tokenFile = "\$HOME/$tokenFile"
-                        }
-                        val script = Toolbox.installScript(p, mode, tokenFile) ?: error("This tool can't be installed on ${mode.name.lowercase()}.")
-                        val (ok, out) = shell(script, 3600)
-                        val loc = Toolbox.location(out)
-                        InstallState(System.currentTimeMillis(), ok, loc, out.takeLast(4000))
-                    }
+        val state = try {
+            when (val mode = settings.runnerMode) {
+                RunnerMode.PHONE -> withContext(Dispatchers.IO) {
+                    val dir = Toolbox.phoneInstall(p, File(getApplication<Application>().filesDir, "workspace/tools"))
+                    InstallState(System.currentTimeMillis(), true, dir.path, "Downloaded to ${dir.path}")
                 }
-            } catch (e: kotlinx.coroutines.CancellationException) { throw e
-            } catch (e: Exception) { InstallState(System.currentTimeMillis(), false, "", e.message ?: "Failed") }
-            record(id, state)
-            installing = installing - id
-            if (installing.isEmpty()) WorkService.stop(getApplication())
-        }
+                else -> {
+                    describeHost() // starts the Termux runner if needed
+                    var tokenFile: String? = null
+                    if (p.token.isNotBlank() && Toolbox.kindOf(p) in setOf(app.switchboard.data.PackageKind.GIT, app.switchboard.data.PackageKind.URL)) {
+                        tokenFile = ".switchboard-token-${p.id.take(8)}"
+                        host().execute(ToolCall("toolbox", "write_file", kotlinx.serialization.json.buildJsonObject {
+                            put("path", "~/$tokenFile"); put("content", Toolbox.authHeader(p.token))
+                        }.toString()))
+                        tokenFile = "\$HOME/$tokenFile"
+                    }
+                    val script = Toolbox.installScript(p, mode, tokenFile) ?: error("This tool can't be installed on ${mode.name.lowercase()}.")
+                    val (ok, out) = shell(script, 3600)
+                    InstallState(System.currentTimeMillis(), ok, Toolbox.location(out), out.takeLast(4000))
+                }
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
+        } catch (e: Exception) { InstallState(System.currentTimeMillis(), false, "", e.message ?: "Failed") }
+        record(id, state)
+        installing = installing - id
+        if (installing.isEmpty() && !streaming) WorkService.stop(getApplication())
+        return state
+    }
+
+    /** install_tool: adds a tool to the toolbox and installs it, so every future chat, agent and task can use it. */
+    private suspend fun installTool(a: JsonObject): ToolResult {
+        val name = a.str("name")?.trim()?.ifBlank { null } ?: return ToolResult("Missing 'name'.", true)
+        val source = a.str("source")?.trim()?.ifBlank { null } ?: return ToolResult("Missing 'source'.", true)
+        val kind = runCatching { app.switchboard.data.PackageKind.valueOf(a.str("type").orEmpty().uppercase()) }.getOrDefault(app.switchboard.data.PackageKind.AUTO)
+        val existing = settings.packages.firstOrNull { it.name.equals(name, true) || it.source == source }
+        val pkg = (existing ?: ToolPackage(name = name, source = source)).copy(name = name, source = source, kind = kind,
+            description = a.str("description") ?: existing?.description.orEmpty())
+        upsertPackage(pkg)
+        val prev = toolStatus
+        toolStatus = "Installing $name…"
+        val st = try { installNow(pkg.id) } finally { toolStatus = prev }
+        return if (st.ok) ToolResult("Installed $name${if (st.location.isNotBlank()) " at ${st.location}" else ""}. It's in the Toolbox now, so future chats, agents and tasks will use it without installing again.")
+        else ToolResult("Installing $name failed:\n${st.log.takeLast(2000)}", true)
     }
 
     fun installAll() = settings.packages.filter { it.installs[settings.runnerMode.name]?.ok != true }.forEach { installPackage(it.id) }

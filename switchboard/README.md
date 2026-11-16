@@ -66,6 +66,10 @@ These tools always run on the phone, because that's where the hardware is:
 | `device_connect` | opens `usb_serial` (built-in drivers: CDC-ACM, CP210x, CH34x, FTDI), `usb_raw` (bulk/interrupt endpoints of any interface), `bt_serial` (SPP), `ble` (GATT; lists services and characteristics), `tcp`, `udp` |
 | `device_write` / `device_read` | send and receive bytes as text, hex or base64; BLE reads, writes and notifications by characteristic UUID |
 | `device_close` | closes a handle |
+| `adb` | built-in ADB client (any mode, nothing to install): `shell`, `push`, `install` on another Android device over ADB-over-TCP (port 5555). The first connection asks the device to allow this phone's key. Android 11+ pairing-code wireless debugging needs `adb tcpip 5555` once, or the Toolbox's Android platform tools in Termux (`adb pair`) |
+| `usb_hid` (connect type) | USB HID devices (keyboards, controllers, scanners, custom HID boards): read input reports, write output reports (interrupt OUT or SET_REPORT), shows the report descriptor |
+| `bt_keyboard` (connect type) | this phone acts as a Bluetooth keyboard (Android 9+) and types text on a paired computer, tablet or TV |
+| `install_tool` | installs a missing tool, driver, SDK or repo and adds it to the Toolbox, so it's kept for every future chat, project, agent and task |
 | `http_request` | any HTTP(S) request; plain http is allowed to LAN addresses |
 | `download_file` | (This phone mode) saves a URL into the workspace, for example firmware or data to send_file |
 
