@@ -43,7 +43,8 @@ import app.switchboard.engine.Extras
 import app.switchboard.engine.FileTools
 import app.switchboard.build.DocMaker
 import app.switchboard.build.PdfMaker
-import app.switchboard.net.ImageGen
+import app.switchboard.net.MediaGen
+import app.switchboard.net.GeneratedFile
 import app.switchboard.data.ApiKind
 import app.switchboard.engine.Scheduler
 import app.switchboard.engine.TaskRun
@@ -184,38 +185,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (trimmed.isEmpty() || streaming) return
         val title = if (current.messages.isEmpty()) trimmed.lineSequence().first().removePrefix("/image").trim().take(48) else current.title
         current = current.copy(title = title, messages = current.messages + ChatMessage(role = Role.USER, text = trimmed))
-        val command = Regex("^/(image|img|draw)\\s+", RegexOption.IGNORE_CASE).find(trimmed)
+        val command = Regex("^/(image|img|draw|video)\\s+", RegexOption.IGNORE_CASE).find(trimmed)
         when {
-            command != null -> respondWithImage(trimmed.substring(command.range.last + 1))
-            asImage -> respondWithImage(trimmed)
-            settings.fileTools && settings.autoImage && looksLikeImageRequest(trimmed) -> respondWithImage(trimmed)
+            command != null -> respondWithMedia(trimmed.substring(command.range.last + 1), video = command.groupValues[1].lowercase() == "video")
+            asImage -> respondWithMedia(trimmed, video = false)
+            settings.fileTools && settings.autoImage && looksLikeVideoRequest(trimmed) && mediaProvider()?.videoModels?.isNotEmpty() == true -> respondWithMedia(trimmed, video = true)
+            settings.fileTools && settings.autoImage && looksLikeImageRequest(trimmed) -> respondWithMedia(trimmed, video = false)
             else -> respond(provider)
         }
     }
 
-    /** Generates an image directly from the user's words and posts it as the reply. */
-    private fun respondWithImage(prompt: String) {
-        val p = imageProvider()
-        val model = settings.imageGen.model.ifBlank { p?.let { ImageGen.defaultModel(it) }.orEmpty() }
-        val reply = ChatMessage(role = Role.ASSISTANT, text = "", source = "Image · ${model.ifBlank { "no model" }}")
+    /** Makes an image (or video) straight from the user's words and posts it as the reply; no chat model involved. */
+    private fun respondWithMedia(prompt: String, video: Boolean) {
+        val reply = ChatMessage(role = Role.ASSISTANT, text = "", source = mediaProvider()?.let { "${it.name} · ${if (video) "video" else "image"}" })
         current = current.copy(messages = current.messages + reply)
         streaming = true
-        WorkService.start(getApplication(), "Generating an image")
+        WorkService.start(getApplication(), if (video) "Generating a video" else "Generating an image")
         job = viewModelScope.launch {
             try {
-                if (p == null) error("No image provider is set up. Choose one in Settings > File generation (OpenRouter or OpenAI).")
-                toolStatus = "Generating image with $model…"
-                awaitRateLimit()
-                toolStatus = "Generating image with $model…"
-                val (files, note) = ImageGen().generate(p, settings.imageGen.model, settings.imageGen.method, prompt, settings.imageGen.size, settings.unrestricted)
-                val base = "image-${System.currentTimeMillis() / 1000}"
-                val atts = withContext(Dispatchers.IO) { files.mapIndexed { i, f -> saveAttachment(f.bytes, "$base${if (files.size > 1) "-${i + 1}" else ""}.${f.extension}", f.mime) } }
-                updateReply(reply.id) { it.copy(text = note.trim().ifBlank { "Here's your image." }.take(2000), attachments = atts) }
+                val (atts, note, model) = if (video) makeVideo(prompt) else makeImage(prompt)
+                updateReply(reply.id) { it.copy(text = note.trim().ifBlank { if (video) "Here's your video." else "Here's your image." }.take(2000),
+                    attachments = atts, source = "${it.source?.substringBefore(" · ")} · $model") }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 updateReply(reply.id) { it.copy(text = "(stopped)", isError = true) }
                 throw e
             } catch (e: Exception) {
-                updateReply(reply.id) { it.copy(text = "⚠ ${e.message}\n\nCheck the image model in Settings > File generation.", isError = true) }
+                updateReply(reply.id) { it.copy(text = "⚠ ${e.message}", isError = true) }
             } finally {
                 toolStatus = null; streaming = false
                 WorkService.stop(getApplication())
@@ -253,8 +248,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val opts = buildOptions()
                 var steps = 0
+                var p = provider
                 while (true) {
-                    val calls = streamTurn(provider, opts) ?: break
+                    val turn = streamTurn(p, opts) ?: break
+                    p = turn.provider // stay on the model that answered for the rest of this reply
+                    val calls = turn.calls
                     if (calls.isEmpty()) break
                     if (++steps > MAX_TOOL_STEPS) {
                         current = current.copy(messages = current.messages + ChatMessage(role = Role.ASSISTANT,
@@ -308,19 +306,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         } finally { toolStatus = null }
     }
 
-    /** One model turn, retried automatically on dropped connections and overloaded servers. */
-    private suspend fun streamTurn(provider: Provider, opts: RequestOptions): List<ToolCall>? {
-        val backoff = listOf(3, 10, 30) // seconds before retry 1, 2, 3
-        for (attempt in 0..backoff.size) {
-            when (val r = attemptTurn(provider, opts, finalAttempt = attempt == backoff.size)) {
-                is TurnOutcome.Done -> return r.calls
-                is TurnOutcome.Failed -> return null
-                is TurnOutcome.Retry -> try {
-                    for (left in backoff[attempt] downTo 1) {
-                        toolStatus = "Connection problem (${r.reason}). Retrying in $left s… (try ${attempt + 2} of ${backoff.size + 1})"
-                        delay(1000)
+    private class TurnResult(val calls: List<ToolCall>, val provider: Provider)
+
+    /**
+     * One model turn. Dropped connections are retried; if a model can't answer (unavailable, out of credits, rate-limited,
+     * overloaded), the next chat model in the provider's priority list takes over with the same full history.
+     * If the conversation is too long for a model, the oldest messages are left out.
+     */
+    private suspend fun streamTurn(provider: Provider, opts: RequestOptions): TurnResult? {
+        val models = provider.chatOrder.ifEmpty { listOf(provider.model) }
+        for ((index, model) in models.withIndex()) {
+            val p = provider.copy(model = model)
+            val canSwitch = index < models.lastIndex
+            val backoff = if (canSwitch) listOf(3) else listOf(3, 10, 30) // seconds; move on quickly when another model is waiting
+            var attempt = 0
+            var keep: Int? = null
+            while (true) {
+                when (val r = attemptTurn(p, opts, finalAttempt = attempt >= backoff.size, keepLast = keep, canSwitch = canSwitch)) {
+                    is TurnOutcome.Done -> return TurnResult(r.calls, p)
+                    is TurnOutcome.Failed -> return null
+                    is TurnOutcome.TrimContext -> { keep = r.keep; toolStatus = "This chat is too long for $model; sending the most recent part…" }
+                    is TurnOutcome.SwitchModel -> {
+                        toolStatus = "$model couldn't answer (${r.reason.take(80)}). Trying ${models[index + 1]}…"
+                        delay(1200); toolStatus = null
+                        break
                     }
-                } finally { toolStatus = null }
+                    is TurnOutcome.Retry -> try {
+                        for (left in backoff[attempt.coerceAtMost(backoff.lastIndex)] downTo 1) {
+                            toolStatus = "Connection problem (${r.reason}). Retrying in $left s… (try ${attempt + 2} of ${backoff.size + 1})"
+                            delay(1000)
+                        }
+                        attempt++
+                    } finally { toolStatus = null }
+                }
             }
         }
         return null
@@ -330,16 +348,39 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         data class Done(val calls: List<ToolCall>) : TurnOutcome
         data object Failed : TurnOutcome
         data class Retry(val reason: String) : TurnOutcome
+        data class SwitchModel(val reason: String) : TurnOutcome
+        data class TrimContext(val keep: Int) : TurnOutcome
+    }
+
+    /** Errors that are about this model (not the network or the API key), so another model may succeed. */
+    private fun modelProblem(e: Exception): Boolean {
+        val code = (e as? app.switchboard.net.ApiException)?.httpCode ?: return false
+        val msg = e.message.orEmpty()
+        return code in setOf(402, 403, 404, 408, 409, 429, 500, 502, 503, 504, 529) ||
+            (code in setOf(400, 422) && Regex("(?i)model|provider|endpoint|unavailable|not (found|supported)|no allowed|modalit").containsMatchIn(msg))
+    }
+
+    private fun contextTooLong(e: Exception): Boolean {
+        val msg = e.message.orEmpty()
+        return (e as? app.switchboard.net.ApiException)?.httpCode == 413 ||
+            Regex("(?i)(context|prompt|input|token)s?.{0,40}(length|limit|too long|too large|maximum|exceed)|too many tokens").containsMatchIn(msg)
     }
 
     /** Models that answered "tools not supported"; they get plain requests from then on (until the app restarts). */
     private val noToolModels = mutableSetOf<String>()
 
-    private suspend fun attemptTurn(provider: Provider, opts0: RequestOptions, finalAttempt: Boolean): TurnOutcome {
-        val opts = if (provider.model in noToolModels && opts0.tools.isNotEmpty())
+    private suspend fun attemptTurn(provider: Provider, opts0: RequestOptions, finalAttempt: Boolean, keepLast: Int? = null, canSwitch: Boolean = false): TurnOutcome {
+        var opts = if (provider.model in noToolModels && opts0.tools.isNotEmpty())
             opts0.copy(tools = emptyList(), system = opts0.system + "\n\nTools aren't available with this model, so answer directly.") else opts0
         awaitRateLimit()
-        val history = current.messages
+        val full = current.messages
+        // Too long for this model: send only the most recent part, starting at a user message.
+        val history = if (keepLast == null || keepLast >= full.size) full else {
+            val tail = full.takeLast(keepLast)
+            val start = tail.indexOfFirst { it.role == Role.USER }.coerceAtLeast(0)
+            opts = opts.copy(system = opts.system + "\n\nEarlier parts of this conversation (${full.size - tail.size + start} messages) were left out to fit this model's context. Ask the user if you need them.")
+            tail.drop(start)
+        }
         val reply = ChatMessage(role = Role.ASSISTANT, text = "", source = "${provider.name} · ${provider.model}")
         current = current.copy(messages = history + reply)
         val buf = StringBuilder()
@@ -351,7 +392,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     is StreamEvent.TurnEnd -> {
                         calls = ev.toolCalls
                         val pics = ev.images.mapIndexedNotNull { i, url ->
-                            runCatching { ImageGen.decodeDataUrl(url) }.getOrNull()?.let { f -> saveAttachment(f.bytes, "image-${System.currentTimeMillis() / 1000}-${i + 1}.${f.extension}", f.mime) }
+                            runCatching { MediaGen.decodeDataUrl(url) }.getOrNull()?.let { f -> saveAttachment(f.bytes, "image-${System.currentTimeMillis() / 1000}-${i + 1}.${f.extension}", f.mime) }
                         }
                         updateReply(reply.id) { it.copy(text = ev.text, toolCalls = ev.toolCalls, anthropicBlocks = ev.anthropicBlocks, attachments = it.attachments + pics) }
                     }
@@ -364,6 +405,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             throw e
         } catch (e: Exception) {
             val msg = e.message ?: e.javaClass.simpleName
+            if (contextTooLong(e) && history.size > 3) {
+                current = current.copy(messages = current.messages.filterNot { it.id == reply.id })
+                return TurnOutcome.TrimContext((history.size / 2).coerceAtLeast(2))
+            }
+            if (canSwitch && modelProblem(e) && (!isRetryable(e) || finalAttempt) && !(opts.tools.isNotEmpty() && Regex("(?i)tool|function").containsMatchIn(msg))) {
+                current = current.copy(messages = current.messages.filterNot { it.id == reply.id })
+                return TurnOutcome.SwitchModel(msg)
+            }
             if (opts.tools.isNotEmpty() && e is app.switchboard.net.ApiException && e.httpCode in setOf(400, 404, 422) && Regex("(?i)tool|function").containsMatchIn(msg)) {
                 noToolModels += provider.model
                 current = current.copy(messages = current.messages.filterNot { it.id == reply.id })
@@ -392,6 +441,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             FileTools.GENERATE_IMAGE -> return generateImage(argsOf(call))
             FileTools.CREATE_DOCUMENT -> return createDocument(argsOf(call))
             FileTools.TEXT_TO_SPEECH -> return textToSpeech(argsOf(call))
+            FileTools.GENERATE_VIDEO -> return generateVideo(argsOf(call))
         }
         if (call.name == Extras.RUN_AGENT) return runAgent(call)
         if (settings.askBeforeRun && current.id !in alwaysAllowed && call.name !in DeviceManager.noApproval) {
@@ -553,10 +603,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (settings.skills.any { it.enabled }) { tools += Extras.useSkill; sys += Extras.skillsNote(settings.skills) }
         if (toolsAllowed && settings.fileTools) {
             tools += listOf(FileTools.createDocument, FileTools.textToSpeech)
-            val img = imageProvider()
+            val img = mediaProvider()
             if (img != null) tools += FileTools.generateImage
+            if (img?.videoModels?.isNotEmpty() == true) tools += FileTools.generateVideo
             sys.add(1, "You can make files for the user: create_document (PDF, Word, Excel, ZIP, or any text format), text_to_speech (audio)" +
-                (if (img != null) ", and generate_image (pictures via ${img.name})" else "") +
+                (if (img != null) ", generate_image (pictures)" else "") + (if (img?.videoModels?.isNotEmpty() == true) ", generate_video (video clips)" else "") +
                 ". Files appear in the chat with Open/Save/Share buttons. Never say you can't make images or files: call these tools.")
         }
         if (allowAgents && toolsAllowed && settings.agents.isNotEmpty()) { tools += Extras.runAgent; sys += Extras.agentsNote(settings.agents) }
@@ -605,26 +656,63 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return Attachment(safe, dest.path, bytes.size.toLong(), mime)
     }
 
-    /** Image provider: the one chosen in Settings > File generation, else the active provider if it can make images. */
-    private fun imageProvider(): Provider? {
-        val p = settings.imageGen.providerId?.let { id -> settings.providers.firstOrNull { it.id == id } } ?: activeProvider ?: return null
-        return p.takeIf { it.kind == ApiKind.OPENAI_COMPATIBLE }
+    /** Images, audio and video come from the chat's own provider when it speaks the OpenAI-style API (OpenRouter, OpenAI, ...). */
+    private fun mediaProvider(): Provider? = providerFor(currentAgent)?.takeIf { it.kind == ApiKind.OPENAI_COMPATIBLE }
+
+    /** Tries [models] in order; returns the first success, or throws with every model's reason. */
+    private suspend fun <T> firstThatWorks(models: List<String>, what: String, attempt: suspend (String) -> T): Pair<T, String> {
+        if (models.isEmpty()) error("No $what models are chosen. Open Settings, edit the provider, and pick $what models.")
+        val errors = mutableListOf<String>()
+        for (m in models.take(8)) {
+            toolStatus = "Making $what with $m…"
+            awaitRateLimit()
+            try { return attempt(m) to m } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { errors += "• $m: ${e.message?.take(200)}" }
+        }
+        error("No model could make the $what:\n" + errors.joinToString("\n") + "\nAdd or reorder $what models in Settings > provider.")
+    }
+
+    private fun saveAll(files: List<GeneratedFile>, base: String) =
+        files.mapIndexed { i, f -> saveAttachment(f.bytes, "$base${if (files.size > 1) "-${i + 1}" else ""}.${f.extension}", f.mime) }
+
+    /** Current model first, then the provider's image priority list (or its other chat models if none are chosen). */
+    private suspend fun makeImage(prompt: String, filename: String? = null): Triple<List<Attachment>, String, String> {
+        val p = mediaProvider() ?: error("Images need an OpenAI-compatible provider such as OpenRouter or OpenAI; Anthropic models can't make images.")
+        val candidates = (listOf(p.model) + p.imageModels + (if (p.imageModels.isEmpty()) p.chatModels else emptyList())).filter { it.isNotBlank() }.distinct()
+        try {
+            val (result, model) = firstThatWorks(candidates, "image") { m -> MediaGen().image(p, m, prompt, settings.unrestricted) }
+            val atts = withContext(Dispatchers.IO) { saveAll(result.first, filename ?: "image-${System.currentTimeMillis() / 1000}") }
+            return Triple(atts, result.second, model)
+        } finally { toolStatus = null }
+    }
+
+    private suspend fun makeVideo(prompt: String, filename: String? = null): Triple<List<Attachment>, String, String> {
+        val p = mediaProvider() ?: error("Videos need an OpenAI-compatible provider.")
+        try {
+            val (file, model) = firstThatWorks(p.videoModels, "video") { m -> MediaGen().video(p, m, prompt, settings.unrestricted) { toolStatus = "$m: $it" } }
+            val atts = withContext(Dispatchers.IO) { saveAll(listOf(file), filename ?: "video-${System.currentTimeMillis() / 1000}") }
+            return Triple(atts, "", model)
+        } finally { toolStatus = null }
     }
 
     private suspend fun generateImage(a: JsonObject): ToolResult {
-        val p = imageProvider() ?: return ToolResult("No image-capable provider. Ask the user to choose one in Settings > File generation (OpenRouter or OpenAI work).", true)
         val prompt = a.str("prompt")?.takeIf { it.isNotBlank() } ?: return ToolResult("Missing 'prompt'.", true)
-        val cfg = settings.imageGen
         val prev = toolStatus
-        toolStatus = "Generating image with ${cfg.model.ifBlank { ImageGen.defaultModel(p) }}…"
         return try {
-            awaitRateLimit()
-            val (files, note) = ImageGen().generate(p, cfg.model, cfg.method, prompt, cfg.size, settings.unrestricted)
-            val base = a.str("filename")?.substringBeforeLast('.')?.ifBlank { null } ?: "image-${System.currentTimeMillis() / 1000}"
-            val atts = withContext(Dispatchers.IO) { files.mapIndexed { i, f -> saveAttachment(f.bytes, "$base${if (files.size > 1) "-${i + 1}" else ""}.${f.extension}", f.mime) } }
-            ToolResult("Created ${atts.size} image(s) (${atts.joinToString { it.name }}); they're shown in the chat.${if (note.isNotBlank()) " Model note: ${note.take(300)}" else ""}", attachments = atts)
+            val (atts, note, model) = makeImage(prompt, a.str("filename")?.substringBeforeLast('.')?.ifBlank { null })
+            ToolResult("Created ${atts.joinToString { it.name }} with $model; shown in the chat.${if (note.isNotBlank()) " Model note: ${note.take(300)}" else ""}", attachments = atts)
         } catch (e: kotlinx.coroutines.CancellationException) { throw e
         } catch (e: Exception) { ToolResult(e.message ?: "Image generation failed.", true)
+        } finally { toolStatus = prev }
+    }
+
+    private suspend fun generateVideo(a: JsonObject): ToolResult {
+        val prompt = a.str("prompt")?.takeIf { it.isNotBlank() } ?: return ToolResult("Missing 'prompt'.", true)
+        val prev = toolStatus
+        return try {
+            val (atts, _, model) = makeVideo(prompt, a.str("filename")?.substringBeforeLast('.')?.ifBlank { null })
+            ToolResult("Created ${atts.joinToString { it.name }} with $model; it's in the chat.", attachments = atts)
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
+        } catch (e: Exception) { ToolResult(e.message ?: "Video generation failed.", true)
         } finally { toolStatus = prev }
     }
 
@@ -666,6 +754,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun textToSpeech(a: JsonObject): ToolResult {
         val text = a.str("text")?.takeIf { it.isNotBlank() } ?: return ToolResult("Missing 'text'.", true)
         val ctx = getApplication<Application>()
+        val p = mediaProvider()
+        if (p != null && p.audioModels.isNotEmpty()) {
+            val prev = toolStatus
+            val viaModel = runCatching { firstThatWorks(p.audioModels, "audio") { m -> MediaGen().audio(p, m, text, a.str("voice") ?: "alloy", settings.unrestricted) } }
+                .also { toolStatus = prev }
+            viaModel.getOrNull()?.let { (file, model) ->
+                val name = a.str("filename")?.substringBeforeLast('.')?.ifBlank { null } ?: "audio-${System.currentTimeMillis() / 1000}"
+                val atts = withContext(Dispatchers.IO) { saveAll(listOf(file), name) }
+                return ToolResult("Created ${atts.single().name} with $model; it's in the chat.", attachments = atts)
+            }
+            viaModel.exceptionOrNull()?.let { if (it is kotlinx.coroutines.CancellationException) throw it }
+        }
+        // No audio models (or none worked): use the phone's own text-to-speech.
         val out = File(ctx.cacheDir, "tts-${System.currentTimeMillis()}.wav")
         val ok = withContext(Dispatchers.Main) {
             kotlinx.coroutines.withTimeoutOrNull(120_000) {
@@ -696,7 +797,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setFileTools(v: Boolean) = updateSettings { it.copy(fileTools = v) }
     fun setAutoImage(v: Boolean) = updateSettings { it.copy(autoImage = v) }
-    fun setImageGen(c: app.switchboard.data.ImageGenConfig) = updateSettings { it.copy(imageGen = c) }
 
     // --- agents (run_agent) ---
 
@@ -917,6 +1017,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun fetchModels(p: Provider): Result<List<String>> = runCatching { client.listModels(p, settings.unrestricted) }
 
+    /** Models the provider offers to this API key, with what each can produce. */
+    suspend fun detectModels(p: Provider): Result<List<app.switchboard.net.ModelInfo>> = runCatching { client.listModelsDetailed(p, settings.unrestricted) }
+
     private fun updateSettings(f: (AppSettings) -> AppSettings) {
         settings = f(settings)
         val snapshot = settings
@@ -956,3 +1059,9 @@ private val notPicture = Regex("\\b(svg|html|css|code|ascii|chart|graph|diagram|
 /** True for messages that clearly ask for a picture, e.g. "generate an image of a man fighting a dragon". */
 fun looksLikeImageRequest(text: String): Boolean =
     text.length < 1500 && !notPicture.containsMatchIn(text) && (imageAsk.containsMatchIn(text) || drawAsk.containsMatchIn(text))
+
+private val videoAsk = Regex("^\\s*(please\\s+|can you\\s+|could you\\s+)?(generate|create|make|render|produce|give me|animate)\\b.{0,60}?\\b(video|clip|animation|movie|film)s?\\b", RegexOption.IGNORE_CASE)
+
+/** True for messages that clearly ask for a video clip. */
+fun looksLikeVideoRequest(text: String): Boolean =
+    text.length < 1500 && videoAsk.containsMatchIn(text) && !Regex("(?i)\\b(script|code|html|css|storyboard|outline|youtube title)\\b").containsMatchIn(text)

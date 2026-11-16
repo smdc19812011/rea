@@ -15,26 +15,25 @@ data class Provider(
     val baseUrl: String,
     /** Encrypted at rest; see [SecretBox]. Never logged. */
     val apiKey: String = "",
+    /** The model chats use right now (always the first entry of [chatModels] when that list is set). */
     val model: String,
-)
+    /** Models in priority order for each kind of task; the next one is tried when one fails. */
+    val chatModels: List<String> = emptyList(),
+    val imageModels: List<String> = emptyList(),
+    val audioModels: List<String> = emptyList(),
+    val videoModels: List<String> = emptyList(),
+) {
+    /** Chat models to try, current first, then the rest of the priority list. */
+    val chatOrder: List<String> get() = (listOf(model) + chatModels).filter { it.isNotBlank() }.distinct()
+}
+
+/** What a task needs from a model. */
+@Serializable
+enum class Task { CHAT, IMAGE, AUDIO, VIDEO }
 
 /** Where tool actions run. */
 @Serializable
 enum class RunnerMode { PHONE, TERMUX, REMOTE }
-
-/** How images are requested: chat completions with image output (OpenRouter) or the /images/generations API (OpenAI-style). */
-@Serializable
-enum class ImageMethod { AUTO, CHAT, IMAGES_API }
-
-@Serializable
-data class ImageGenConfig(
-    /** null = the active provider. */
-    val providerId: String? = null,
-    /** Blank = a sensible default for the provider. */
-    val model: String = "",
-    val method: ImageMethod = ImageMethod.AUTO,
-    val size: String = "1024x1024",
-)
 
 @Serializable
 enum class Role { USER, ASSISTANT, TOOL }
@@ -214,7 +213,6 @@ data class AppSettings(
     val fileTools: Boolean = true,
     /** Send messages that clearly ask for a picture straight to the image model (doesn't rely on the chat model using tools). */
     val autoImage: Boolean = true,
-    val imageGen: ImageGenConfig = ImageGenConfig(),
 )
 
 /** Starting points offered in the "Add provider" dialog. Users can edit every field. */

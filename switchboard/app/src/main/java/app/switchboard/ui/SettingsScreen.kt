@@ -64,6 +64,10 @@ import androidx.compose.ui.unit.dp
 import app.switchboard.data.ApiKind
 import app.switchboard.data.Presets
 import app.switchboard.data.Provider
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import app.switchboard.data.Task
 import app.switchboard.data.RunnerMode
 import app.switchboard.data.DailyReset
 import androidx.compose.foundation.lazy.LazyColumn
@@ -174,7 +178,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit, onOpen: (String) -> Un
         text = { Text("API keys and chats can be sent over unencrypted http:// to any server you enter, and very large token limits can run up provider costs. Only use servers you trust.") },
         confirmButton = { TextButton(onClick = { vm.setUnrestricted(true); confirmUnrestricted = false }) { Text("Turn on") } },
         dismissButton = { TextButton(onClick = { confirmUnrestricted = false }) { Text("Cancel") } })
-    editing?.let { p -> ProviderDialog(p, isNew = s.providers.none { it.id == p.id }, unrestricted = s.unrestricted, onDismiss = { editing = null }, onSave = { vm.upsertProvider(it); editing = null }) }
+    editing?.let { p -> ProviderDialog(vm, p, isNew = s.providers.none { it.id == p.id }, unrestricted = s.unrestricted, onDismiss = { editing = null }, onSave = { vm.upsertProvider(it); editing = null }) }
     confirmDelete?.let { p ->
         AlertDialog(onDismissRequest = { confirmDelete = null },
             title = { Text("Delete ${p.name}?") }, text = { Text("Its saved API key will be removed from this device.") },
@@ -185,19 +189,37 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit, onOpen: (String) -> Un
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ProviderDialog(initial: Provider, isNew: Boolean, unrestricted: Boolean, onDismiss: () -> Unit, onSave: (Provider) -> Unit) {
+private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean, unrestricted: Boolean, onDismiss: () -> Unit, onSave: (Provider) -> Unit) {
     var name by remember { mutableStateOf(initial.name) }
     var kind by remember { mutableStateOf(initial.kind) }
     var url by remember { mutableStateOf(initial.baseUrl) }
     var key by remember { mutableStateOf(initial.apiKey) }
-    var model by remember { mutableStateOf(initial.model) }
     var showKey by remember { mutableStateOf(false) }
+    // Priority lists per task (index 0 = tried first).
+    var lists by remember { mutableStateOf(mapOf(
+        Task.CHAT to initial.chatOrder, Task.IMAGE to initial.imageModels, Task.AUDIO to initial.audioModels, Task.VIDEO to initial.videoModels)) }
+    var task by remember { mutableStateOf(Task.CHAT) }
+    var models by remember { mutableStateOf<List<app.switchboard.net.ModelInfo>?>(null) }
+    var detectNote by remember { mutableStateOf<String?>(null) }
+    var query by remember { mutableStateOf("") }
+    var showAll by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
     val urlOk = (url.startsWith("https://") && host.isNotEmpty()) ||
         (url.startsWith("http://") && host.isNotEmpty() && (unrestricted || app.switchboard.net.isLocalHost(host)))
     val keyNeeded = kind == ApiKind.ANTHROPIC
     val valid = name.isNotBlank() && urlOk && (!keyNeeded || key.isNotBlank())
+    fun draft() = initial.copy(name = name.trim(), kind = kind, baseUrl = url.trimEnd('/'), apiKey = key)
+    fun detect() {
+        detectNote = "Finding the models this key can use…"
+        scope.launch {
+            vm.detectModels(draft()).onSuccess { models = it; detectNote = "${it.size} models available" + if (it.any { m -> m.free }) " (${it.count { m -> m.free }} free)" else "" }
+                .onFailure { detectNote = "Couldn't list models: ${it.message}" }
+        }
+    }
+    // Detect as soon as the dialog opens for a provider that already has a key (or doesn't need one).
+    androidx.compose.runtime.LaunchedEffect(Unit) { if (urlOk && (key.isNotBlank() || !keyNeeded) && !isNew) detect() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -222,19 +244,83 @@ private fun ProviderDialog(initial: Provider, isNew: Boolean, unrestricted: Bool
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     trailingIcon = { IconButton(onClick = { showKey = !showKey }) {
                         Icon(if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (showKey) "Hide key" else "Show key") } })
-                OutlinedTextField(model, { model = it.trim() }, label = { Text("Model ID") }, singleLine = true,
-                    supportingText = { Text("You can also browse the provider's models from the chat screen.") }, modifier = Modifier.fillMaxWidth())
+
+                HorizontalDivider()
+                Text("Models by priority", style = MaterialTheme.typography.titleSmall)
+                Text("For each task, pick models in the order to try them. When #1 can't do it (unavailable, out of credits, can't make that kind of output), #2 is tried, and so on.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FilledTonalButton(enabled = urlOk && (key.isNotBlank() || !keyNeeded), onClick = { detect() }) { Text(if (models == null) "Detect available models" else "Detect again") }
+                detectNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+
+                val tasks = listOf(Task.CHAT to "Chat", Task.IMAGE to "Image", Task.AUDIO to "Audio", Task.VIDEO to "Video")
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    tasks.forEachIndexed { i, (t, label) ->
+                        val n = lists[t].orEmpty().size
+                        SegmentedButton(selected = task == t, onClick = { task = t; query = "" }, shape = SegmentedButtonDefaults.itemShape(i, tasks.size)) {
+                            Text(if (n > 0) "$label $n" else label, maxLines = 1)
+                        }
+                    }
+                }
+                val chosen = lists[task].orEmpty()
+                fun setChosen(l: List<String>) { lists = lists + (task to l) }
+                if (chosen.isEmpty()) Text(when (task) {
+                    Task.CHAT -> "No chat model chosen yet."
+                    Task.IMAGE -> "None chosen: images are tried with the current chat model, then the other chat models."
+                    Task.AUDIO -> "None chosen: audio uses the phone's built-in voice."
+                    Task.VIDEO -> "None chosen: video generation is off."
+                }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                chosen.forEachIndexed { i, id ->
+                    FRow(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${i + 1}.", style = MaterialTheme.typography.labelLarge, modifier = Modifier.size(width = 28.dp, height = 20.dp))
+                        Text(id, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 2)
+                        IconButton(enabled = i > 0, onClick = { setChosen(chosen.toMutableList().apply { add(i - 1, removeAt(i)) }) }) {
+                            Icon(Icons.Default.KeyboardArrowUp, "Move $id up") }
+                        IconButton(enabled = i < chosen.lastIndex, onClick = { setChosen(chosen.toMutableList().apply { add(i + 1, removeAt(i)) }) }) {
+                            Icon(Icons.Default.KeyboardArrowDown, "Move $id down") }
+                        IconButton(onClick = { setChosen(chosen - id) }) { Icon(Icons.Default.Close, "Remove $id") }
+                    }
+                }
+
+                OutlinedTextField(query, { query = it }, label = { Text("Search models") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                val all = models
+                if (all != null) {
+                    FRow(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.Checkbox(checked = showAll, onCheckedChange = { showAll = it })
+                        Text("Show models that may not support ${tasks.first { it.first == task }.second.lowercase()}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    val shown = all.filter { m -> m.id !in chosen && (showAll || m.fits(task)) &&
+                        (query.isBlank() || m.id.contains(query.trim(), true) || m.name.contains(query.trim(), true)) }
+                        .sortedWith(compareByDescending<app.switchboard.net.ModelInfo> { it.free }.thenBy { it.id })
+                    if (shown.isEmpty()) Text("No matching models.", style = MaterialTheme.typography.bodySmall)
+                    shown.take(60).forEach { m ->
+                        FRow(Modifier.fillMaxWidth().clickable { setChosen(chosen + m.id) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Add, "Add ${m.id}", tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.size(6.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(m.id, style = MaterialTheme.typography.bodySmall)
+                                val tags = listOfNotNull("free".takeIf { m.free }, m.outputs.takeIf { it.isNotEmpty() }?.joinToString("+")?.let { "makes $it" },
+                                    m.contextLength?.let { "${it / 1000}k context" })
+                                if (tags.isNotEmpty()) Text(tags.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    if (shown.size > 60) Text("…${shown.size - 60} more; search to narrow down.", style = MaterialTheme.typography.labelSmall)
+                }
+                // Providers without a model list (some local servers): add the searched ID directly.
+                if (query.isNotBlank() && (all == null || all.none { it.id == query.trim() }) && query.trim() !in chosen)
+                    TextButton(onClick = { setChosen(chosen + query.trim()); query = "" }) { Text("Add \"${query.trim()}\" anyway") }
             }
         },
         confirmButton = {
             TextButton(enabled = valid, onClick = {
-                onSave(initial.copy(name = name.trim(), kind = kind, baseUrl = url.trimEnd('/'), apiKey = key, model = model))
+                val chat = lists[Task.CHAT].orEmpty()
+                onSave(draft().copy(model = chat.firstOrNull() ?: initial.model, chatModels = chat,
+                    imageModels = lists[Task.IMAGE].orEmpty(), audioModels = lists[Task.AUDIO].orEmpty(), videoModels = lists[Task.VIDEO].orEmpty()))
             }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
-
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -417,12 +503,11 @@ private fun ZoneRow(label: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun FileGenSection(vm: ChatViewModel) {
     val s = vm.settings
-    val cfg = s.imageGen
-    val scope = rememberCoroutineScope()
     FRow(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text("File generation", style = MaterialTheme.typography.titleMedium)
-            Text("Lets the model create images, PDF, Word, Excel, ZIP, audio and text files, delivered in the chat.",
+            Text("Lets the model create images, video, audio, PDF, Word, Excel, ZIP and text files, delivered in the chat. " +
+                "Images, audio and video use the models you rank for those tasks when editing a provider.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = s.fileTools, onCheckedChange = vm::setFileTools)
@@ -430,39 +515,10 @@ private fun FileGenSection(vm: ChatViewModel) {
     if (!s.fileTools) return
     FRow(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("Detect picture requests", style = MaterialTheme.typography.bodyLarge)
-            Text("Messages like \"generate an image of…\" or \"draw a…\" go straight to the image model. You can also use the 🎨 button or type /image.",
+            Text("Detect picture and video requests", style = MaterialTheme.typography.bodyLarge)
+            Text("Messages like \"generate an image of…\" go straight to the image models, even if the chat model ignores tools. You can also use the 🎨 button, /image or /video.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = s.autoImage, onCheckedChange = vm::setAutoImage)
     }
-    Text("Images are made by an image model, even when you chat with a text-only model. OpenRouter and OpenAI work; Anthropic doesn't make images.",
-        style = MaterialTheme.typography.bodySmall)
-    val compatible = s.providers.filter { it.kind == app.switchboard.data.ApiKind.OPENAI_COMPATIBLE }
-    Picker("Image provider", listOf<Pair<String?, String>>(null to "Active provider") + compatible.map { it.id to it.name }, cfg.providerId) { vm.setImageGen(cfg.copy(providerId = it)) }
-    val provider = cfg.providerId?.let { id -> s.providers.firstOrNull { it.id == id } } ?: vm.activeProvider
-    var model by remember { mutableStateOf(cfg.model) }
-    OutlinedTextField(model, { model = it.trim(); vm.setImageGen(cfg.copy(model = model)) }, label = { Text("Image model") }, singleLine = true,
-        placeholder = { Text(provider?.let { app.switchboard.net.ImageGen.defaultModel(it) }.orEmpty().ifBlank { "model ID" }) },
-        modifier = Modifier.fillMaxWidth())
-    var found by remember { mutableStateOf<List<String>?>(null) }
-    var note by remember { mutableStateOf<String?>(null) }
-    OutlinedButton(enabled = provider != null, onClick = {
-        note = "Loading…"
-        scope.launch {
-            vm.fetchModels(provider!!).onSuccess { all -> found = all.filter { m -> listOf("image", "dall", "flux", "imagen", "diffusion", "sdxl").any { it in m.lowercase() } }; note = null }
-                .onFailure { note = "Couldn't load models: ${it.message}" }
-        }
-    }) { Text("Find image models") }
-    note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-    found?.let { list ->
-        if (list.isEmpty()) Text("No image models found on this provider.", style = MaterialTheme.typography.bodySmall)
-        list.take(30).forEach { id ->
-            Text(id, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth().clickable { model = id; vm.setImageGen(cfg.copy(model = id)); found = null }.padding(vertical = 8.dp))
-        }
-    }
-    Picker("Request type", listOf(app.switchboard.data.ImageMethod.AUTO to "Automatic", app.switchboard.data.ImageMethod.CHAT to "Chat with image output (OpenRouter)",
-        app.switchboard.data.ImageMethod.IMAGES_API to "Images API (OpenAI-style)"), cfg.method) { vm.setImageGen(cfg.copy(method = it)) }
-    var size by remember { mutableStateOf(cfg.size) }
-    OutlinedTextField(size, { size = it.trim(); vm.setImageGen(cfg.copy(size = size)) }, label = { Text("Size (Images API)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 }

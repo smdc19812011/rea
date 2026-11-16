@@ -202,6 +202,19 @@ class ChatClientTest {
         val end = ChatClient().stream(p, history, RequestOptions()).toList().filterIsInstance<StreamEvent.TurnEnd>().single()
         assertEquals("Here:", end.text)
         assertEquals(listOf("data:image/png;base64,iVBORw0KGgo="), end.images)
-        assertEquals("image/png", ImageGen.decodeDataUrl(end.images[0])!!.mime)
+        assertEquals("image/png", MediaGen.decodeDataUrl(end.images[0])!!.mime)
+    }
+
+    @Test fun filesInTheChatAreDescribedToTheNextModel() {
+        val withImage = history + ChatMessage(role = Role.ASSISTANT, text = "Here's your image.",
+            attachments = listOf(app.switchboard.data.Attachment("dragon.png", "/x/dragon.png", 204_800, "image/png")))
+        val body = ChatClient().openAiBody(Provider(name = "O", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = base, model = "m"),
+            ChatClient().normalize(withImage), RequestOptions()).toString()
+        assertTrue(body, body.contains("Here's your image.\\n\\n[File shared in this chat: dragon.png (image/png, 200 KB)]"))
+    }
+
+    @Test fun chatOrderPutsCurrentModelFirst() {
+        val p = Provider(name = "O", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = base, model = "b", chatModels = listOf("a", "b", "c"))
+        assertEquals(listOf("b", "a", "c"), p.chatOrder)
     }
 }

@@ -54,6 +54,21 @@ data class RequestOptions(
     val tools: List<ToolSpec> = emptyList(),
 )
 
+/** A model offered by a provider. [outputs] is empty when the provider doesn't say (then the name decides). */
+data class ModelInfo(val id: String, val name: String = id, val inputs: Set<String> = emptySet(), val outputs: Set<String> = emptySet(),
+                     val free: Boolean = false, val contextLength: Int? = null) {
+    private val n = id.lowercase()
+    private val imageName = Regex("image|dall-?e|imagen|flux|stable-?diffusion|sdxl|midjourney|recraft|ideogram|seedream")
+    private val audioName = Regex("tts|audio|speech|voice|lyria|music")
+    private val videoName = Regex("sora|veo|video|kling|runway|hailuo|seedance|pika|luma")
+    fun fits(task: app.switchboard.data.Task): Boolean = when (task) {
+        app.switchboard.data.Task.CHAT -> if (outputs.isNotEmpty()) "text" in outputs else !videoName.containsMatchIn(n) && !Regex("^(dall-?e|tts|whisper|sora|text-embedding|omni-moderation)").containsMatchIn(n)
+        app.switchboard.data.Task.IMAGE -> "image" in outputs || (outputs.isEmpty() && imageName.containsMatchIn(n))
+        app.switchboard.data.Task.AUDIO -> "audio" in outputs || (outputs.isEmpty() && audioName.containsMatchIn(n))
+        app.switchboard.data.Task.VIDEO -> "video" in outputs || videoName.containsMatchIn(n)
+    }
+}
+
 /** Provider-neutral tool definition; [schema] is a JSON Schema object. */
 data class ToolSpec(val name: String, val description: String, val schema: JsonObject)
 
@@ -111,17 +126,27 @@ class ChatClient {
         awaitClose { call.cancel() }
     }.flowOn(Dispatchers.IO)
 
-    suspend fun listModels(p: Provider, unrestricted: Boolean = false): List<String> = withContext(Dispatchers.IO) {
+    suspend fun listModels(p: Provider, unrestricted: Boolean = false): List<String> = listModelsDetailed(p, unrestricted).map { it.id }
+
+    /** Every model the API key can use, with input/output types and price when the provider reports them (OpenRouter does). */
+    suspend fun listModelsDetailed(p: Provider, unrestricted: Boolean = false): List<ModelInfo> = withContext(Dispatchers.IO) {
         val b = Request.Builder().url(p.baseUrl.trimEnd('/') + "/models?limit=1000").get()
         authHeaders(b, p)
         val req = b.build()
         checkTransport(req, unrestricted)
         http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw ApiException(errorText(resp))
+            if (!resp.isSuccessful) throw ApiException(errorText(resp), resp.code)
             val root = json.parseToJsonElement(resp.body!!.string()).jsonObject
-            root["data"]?.jsonArray.orEmpty()
-                .mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull }
-                .sorted()
+            root["data"]?.jsonArray.orEmpty().mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                val id = o.str("id") ?: return@mapNotNull null
+                val arch = o["architecture"] as? JsonObject
+                fun set(k: String) = (arch?.get(k) as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }?.toSet().orEmpty()
+                val pricing = o["pricing"] as? JsonObject
+                val free = id.endsWith(":free") || (pricing != null && listOf("prompt", "completion").all { k -> pricing.str(k)?.toDoubleOrNull() == 0.0 })
+                ModelInfo(id, o.str("name") ?: o.str("display_name") ?: id, set("input_modalities"), set("output_modalities"), free,
+                    o.str("context_length")?.toIntOrNull())
+            }.sortedBy { it.id }
         }
     }
 
@@ -310,13 +335,13 @@ class ChatClient {
         }
         for (m in history) {
             if (m.role == Role.TOOL) {
-                if (pending.any { it.id == m.toolCallId }) { out += m; pending = pending.filterNot { it.id == m.toolCallId } }
+                if (pending.any { it.id == m.toolCallId }) { out += m.withAttachmentNote(); pending = pending.filterNot { it.id == m.toolCallId } }
                 continue
             }
             flushPending()
             if (m.role == Role.ASSISTANT && (m.isError || (m.text.isBlank() && m.toolCalls.isEmpty()))) continue
             if (m.role == Role.USER && m.text.isBlank()) continue
-            out += m
+            out += m.withAttachmentNote()
             if (m.role == Role.ASSISTANT) pending = m.toolCalls
         }
         flushPending()
@@ -375,6 +400,15 @@ class ChatClient {
         return "HTTP ${resp.code}: ${msg ?: raw.take(300).ifBlank { resp.message }}"
     }
 }
+
+/**
+ * Files in a message (generated images, documents, audio) are described in its text, so every model, including one
+ * switched in later, knows what's in the chat.
+ */
+fun ChatMessage.withAttachmentNote(): ChatMessage = if (attachments.isEmpty()) this else copy(
+    text = (text.trim() + "\n\n" + attachments.joinToString("\n") { "[File shared in this chat: ${it.name} (${it.mime}, ${it.size / 1024} KB)]" }).trim(),
+    attachments = emptyList(),
+)
 
 internal fun JsonObject.str(k: String): String? = (this[k] as? JsonPrimitive)?.contentOrNull
 internal fun JsonObject.int(k: String, default: Int = 0): Int = (this[k] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: default

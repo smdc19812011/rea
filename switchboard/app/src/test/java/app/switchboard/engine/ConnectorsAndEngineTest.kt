@@ -131,13 +131,42 @@ class ConnectorsAndEngineTest {
         assertTrue(note, note.contains("project \"Launch\"") && note.contains("Be brief.") && note.contains("--- Project file: notes.txt ---\nBudget is 5k."))
     }
 
-    @Test fun imageGenerationBothMethods() = runBlocking {
+    @Test fun imageGenerationTriesChatOutputThenImagesApi() = runBlocking {
         val p = Provider(name = "Mock", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = "$base/v1", model = "chat")
         val png = byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte())
-        val (viaChat, text) = app.switchboard.net.ImageGen().generate(p, "img-model", app.switchboard.data.ImageMethod.CHAT, "a dragon", "", false)
+        val (viaChat, text) = app.switchboard.net.MediaGen().image(p, "img-model", "a dragon", false)
         assertEquals("Here you go", text)
         assertTrue(viaChat.single().bytes.copyOf(4).contentEquals(png) && viaChat.single().mime == "image/png")
-        val (viaApi, _) = app.switchboard.net.ImageGen().generate(p, "img-model", app.switchboard.data.ImageMethod.IMAGES_API, "a dragon", "1024x1024", false)
+        // Chat image output not supported for this model -> falls back to /images/generations.
+        val (viaApi, _) = app.switchboard.net.MediaGen().image(p, "api-only", "a dragon", false)
         assertTrue(viaApi.single().bytes.copyOf(4).contentEquals(png))
+        // A text-only model fails both ways with a clear reason (the app then moves to the next model).
+        val err = runCatching { app.switchboard.net.MediaGen().image(p, "text/model", "a dragon", false) }.exceptionOrNull()
+        assertTrue("$err", err?.message.orEmpty().contains("text/model couldn't make an image"))
+    }
+
+    @Test fun audioAndVideoGeneration() = runBlocking {
+        val p = Provider(name = "Mock", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = "$base/v1", model = "chat")
+        val mp3 = app.switchboard.net.MediaGen().audio(p, "voice/model", "hello", "alloy", false)
+        assertEquals("audio/mpeg", mp3.mime); assertEquals("mp3", mp3.extension); assertEquals("ID3fake-mp3", mp3.bytes.decodeToString())
+        val statuses = mutableListOf<String>()
+        val video = app.switchboard.net.MediaGen().video(p, "openai/sora-2", "waves at sunset", false) { statuses += it }
+        assertEquals("video/mp4", video.mime)
+        assertTrue(statuses.toString(), statuses.first().contains("in_progress") && statuses.last().contains("completed"))
+        assertTrue(runCatching { app.switchboard.net.MediaGen().video(p, "text/model", "x", false) {} }.isFailure)
+    }
+
+    @Test fun detectsModelsWithCapabilities() = runBlocking {
+        val p = Provider(name = "Mock", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = "$base/v1", model = "chat")
+        val models = ChatClient().listModelsDetailed(p).associateBy { it.id }
+        assertEquals(setOf("text/model", "draw/model:free", "voice/model", "openai/sora-2"), models.keys)
+        val t = app.switchboard.data.Task.entries
+        fun fits(id: String) = t.filter { models.getValue(id).fits(it) }
+        assertEquals(listOf(app.switchboard.data.Task.CHAT), fits("text/model"))
+        assertEquals(listOf(app.switchboard.data.Task.CHAT, app.switchboard.data.Task.IMAGE), fits("draw/model:free"))
+        assertEquals(listOf(app.switchboard.data.Task.CHAT, app.switchboard.data.Task.AUDIO), fits("voice/model"))
+        assertTrue(app.switchboard.data.Task.VIDEO in fits("openai/sora-2") && app.switchboard.data.Task.CHAT !in fits("openai/sora-2"))
+        assertTrue(models.getValue("draw/model:free").free && !models.getValue("text/model").free)
+        assertEquals(128000, models.getValue("text/model").contextLength)
     }
 }

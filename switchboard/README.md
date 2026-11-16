@@ -72,14 +72,19 @@ These tools always run on the phone, because that's where the hardware is:
 Android asks for USB access per device and for Bluetooth permission the first time. Listing, reading and closing don't need approval; connecting, writing, HTTP and downloads follow "Ask before each action".
 Android apps can't load kernel drivers, so USB-serial chips are driven from user space, and other USB devices go through `usb_raw`. To install compilers, SDKs and other tools, use Termux or Computer mode (`pkg install`, `pip`, and so on). The phone sandbox can't run downloaded programs.
 
+## Models by priority
+Edit a provider and tap **Detect available models**: Switchboard lists every model your API key can use. OpenRouter also reports what each model outputs and whether it's free; for other providers this is guessed from the name. For each task (**Chat, Image, Audio, Video**), add models and order them with the arrows.
+- **Chat**: the model in use answers. If it fails (unavailable, out of credits, rate-limited, overloaded), the next one takes over with the full conversation. Switch quickly in the model menu (tap the model name).
+- **Image**: the current chat model is asked first, then the image list (or the other chat models if none are chosen). OpenRouter-style image output and the `/images/generations` API are both tried for each model.
+- **Audio**: audio models in order (`/audio/speech`, then chat audio output), otherwise the phone's built-in voice.
+- **Video**: video models in order (`/videos` jobs, polled until done).
+- **Context carries over**: every chat is saved with its full history, files in the chat are described in the text sent to the model, and if a fallback model's context is too small, the oldest messages are left out with a note to the model.
+
 ## File generation
-On by default (Settings, then File generation). Files appear in the chat with Open, Save and Share buttons, and images show inline.
-- **Pictures without relying on the chat model**: the 🎨 button next to the message box, `/image <description>`, or (on by default) automatic detection of messages like "generate an image of…" or "draw a…" send the request straight to the image model. Requests for SVG, diagrams, charts or code stay with the chat model.
-- `generate_image`: uses the image model you pick (any OpenAI-compatible provider: OpenRouter's chat image output, or the `/images/generations` API), so it works even when you chat with a text-only model. Images that a chat model returns on its own are shown too.
-- `create_document`: **PDF** (Android's PDF engine, full Unicode), **Word .docx**, **Excel .xlsx** (from CSV, multiple sheets), **ZIP** of workspace files, and any text format (md, html, csv, json, svg, ics, code...).
-- `text_to_speech`: a .wav file made with the phone's voice engine.
-- `write_file` accepts `encoding: base64`, so the model can write any binary file it can produce.
-- If a model rejects tool calls, Switchboard retries without tools automatically.
+On by default (Settings, then File generation). Files appear in the chat with Open, Save and Share buttons, and images show inline. Picture and video requests ("generate an image of…", the 🎨 button, `/image`, `/video`) go straight to the image or video models, so they work even when the chat model ignores tools.
+- `create_document`: **PDF**, **Word .docx**, **Excel .xlsx**, **ZIP**, and any text format.
+- `generate_image`, `generate_video` and `text_to_speech` use the priority lists above.
+- `write_file` accepts `encoding: base64` for any binary file.
 
 ## Connectors, skills, agents, projects and scheduled tasks
 Everything below is in **Settings**, at the top of the page.

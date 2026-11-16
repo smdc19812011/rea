@@ -30,6 +30,17 @@ class H(BaseHTTPRequestHandler):
             if self.headers.get("X-API-Key") != "k": return self.send(401, {"error": "bad key"})
             return self.send(200, {"items": ["a", "b"], "q": urllib.parse.parse_qs(u.query).get("q", [""])[0]})
         if u.path == "/stats": return self.send(200, STATS)
+        if u.path == "/v1/models":  # OpenRouter-style listing with capabilities and prices
+            return self.send(200, {"data": [
+                {"id": "text/model", "name": "Text", "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}, "pricing": {"prompt": "0.000001", "completion": "0.000002"}, "context_length": 128000},
+                {"id": "draw/model:free", "name": "Draw", "architecture": {"input_modalities": ["text"], "output_modalities": ["image", "text"]}, "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "voice/model", "architecture": {"output_modalities": ["audio", "text"]}},
+                {"id": "openai/sora-2"}]})
+        if u.path.startswith("/v1/videos/"):
+            vid = u.path.split("/")[3]
+            if u.path.endswith("/content"): return self.send(200, raw=b"\x00\x00\x00\x18ftypmp42", ctype="video/mp4")
+            STATS["video_polls"] = STATS.get("video_polls", 0) + 1
+            return self.send(200, {"id": vid, "status": "completed" if STATS["video_polls"] >= 2 else "in_progress", "progress": 50})
         self.send(404, {"error": "nope"})
 
     def do_POST(self):
@@ -66,12 +77,22 @@ class H(BaseHTTPRequestHandler):
                 text = msg["params"]["arguments"].get("text", "")
                 return self.send(200, {"jsonrpc": "2.0", "id": msg["id"], "result": {"content": [{"type": "text", "text": "echo: " + text}], "isError": False}})
             return self.send(200, {"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32601, "message": "unknown method"}})
+        if u.path == "/v1/audio/speech":
+            req = json.loads(raw)
+            if req["model"] != "voice/model": return self.send(404, {"error": {"message": "not a speech model"}})
+            return self.send(200, raw=b"ID3fake-mp3", ctype="audio/mpeg")
+        if u.path == "/v1/videos":
+            req = json.loads(raw)
+            if req["model"] != "openai/sora-2": return self.send(404, {"error": {"message": "no video"}})
+            return self.send(200, {"id": "vid_1", "status": "queued"})
         if u.path == "/v1/images/generations":
-            req = json.loads(raw); assert req["prompt"] and req["model"] == "img-model"
+            req = json.loads(raw); assert req["prompt"] and req["model"] in ("img-model", "api-only")
             return self.send(200, {"data": [{"b64_json": PNG}]})
         if u.path == "/v1/chat/completions":  # one tool call, then a final answer once the tool result is in the history
             STATS["chat_calls"] += 1
             req = json.loads(raw)
+            if req.get("modalities") == ["image", "text"] and req["model"] in ("api-only", "text/model"):
+                return self.send(404, {"error": {"message": "No endpoints found that support the requested output modalities"}})
             if req.get("modalities") == ["image", "text"]:
                 return self.send(200, {"choices": [{"message": {"role": "assistant", "content": "Here you go",
                     "images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64," + PNG}}]}}]})

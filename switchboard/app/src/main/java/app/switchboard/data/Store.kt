@@ -17,7 +17,10 @@ class Store(context: Context) {
         val raw = runCatching { json.decodeFromString<AppSettings>(settingsFile.readText()) }.getOrNull()
             ?: return AppSettings()
         return raw.copy(
-            providers = raw.providers.map { it.copy(apiKey = SecretBox.decrypt(it.apiKey)) },
+            // Older versions stored only one model: make it the first chat choice.
+            providers = raw.providers.map { p ->
+                p.copy(apiKey = SecretBox.decrypt(p.apiKey), chatModels = p.chatModels.ifEmpty { listOfNotNull(p.model.takeIf { it.isNotBlank() }) })
+            },
             runnerToken = SecretBox.decrypt(raw.runnerToken),
             termuxToken = SecretBox.decrypt(raw.termuxToken),
             connectors = raw.connectors.map { it.copy(auth = it.auth.mapSecrets(SecretBox::decrypt)) },

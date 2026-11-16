@@ -103,7 +103,7 @@ class MainActivity : ComponentActivity() {
                 }) {
                     ChatScreen(vm, onMenu = { scope.launch { drawer.open() } }, onSettings = { showSettings = true }, onPickModel = { showModels = true })
                 }
-                if (showModels) ModelSheet(vm, onDismiss = { showModels = false })
+                if (showModels) ModelSheet(vm, onDismiss = { showModels = false }, onEditProviders = { showSettings = true })
                 renaming?.let { c -> RenameDialog(vm, c) { renaming = null } }
             }
         }
