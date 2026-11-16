@@ -517,7 +517,7 @@ private fun FileGenSection(vm: ChatViewModel) {
     FRow(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text("Detect picture and video requests", style = MaterialTheme.typography.bodyLarge)
-            Text("Messages like \"generate an image of…\" go straight to the image models, even if the chat model ignores tools. You can also use the 🎨 button, /image or /video.",
+            Text("Messages like \"generate an image of…\" go straight to the image models, even if the chat model ignores tools. You can also type /image or /video.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = s.autoImage, onCheckedChange = vm::setAutoImage)

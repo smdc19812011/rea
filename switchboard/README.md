@@ -92,7 +92,7 @@ Edit a provider and tap **Detect available models**: Switchboard lists every mod
 - **Context carries over**: every chat is saved with its full history, files in the chat are described in the text sent to the model, and if a fallback model's context is too small, the oldest messages are left out with a note to the model.
 
 ## File generation
-On by default (Settings, then File generation). Files appear in the chat with Open, Save and Share buttons, and images show inline. Picture and video requests ("generate an image of…", the 🎨 button, `/image`, `/video`) go straight to the image or video models, so they work even when the chat model ignores tools.
+On by default (Settings, then File generation). Files appear in the chat with Open, Save and Share buttons, and images show inline. Picture and video requests ("generate an image of…", `/image`, `/video`) go straight to the image or video models, so they work even when the chat model ignores tools.
 - `create_document`: **PDF**, **Word .docx**, **Excel .xlsx**, **ZIP**, and any text format.
 - `generate_image`, `generate_video` and `text_to_speech` use the priority lists above.
 - `write_file` accepts `encoding: base64` for any binary file.
