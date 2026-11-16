@@ -66,6 +66,7 @@ import app.switchboard.net.Runner
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Add
@@ -195,12 +196,55 @@ private fun MessageList(
     val results = msgs.filter { it.role == Role.TOOL }.associateBy { it.toolCallId }
     val lastLen = msgs.lastOrNull()?.text?.length ?: 0
     LaunchedEffect(msgs.size, lastLen, pending) { if (visible.isNotEmpty()) state.scrollToItem(visible.lastIndex, Int.MAX_VALUE) }
-    LazyColumn(state = state, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        items(visible, key = { it.id }) { m ->
-            val isLast = m.id == visible.last().id
-            if (m.role == Role.USER) UserBubble(m)
-            else AssistantBlock(m, isLast, streaming && isLast, streaming, results, pending, onDecide, onRegenerate)
+    // Assistant turns that only call tools (no text) are folded into one "Ran N steps" row.
+    val groups = remember(visible) {
+        val out = mutableListOf<List<ChatMessage>>()
+        for (m in visible) {
+            val toolOnly = m.role == Role.ASSISTANT && m.text.isBlank() && m.toolCalls.isNotEmpty() && !m.isError
+            val prev = out.lastOrNull()
+            if (toolOnly && prev != null && prev.first().let { it.role == Role.ASSISTANT && it.text.isBlank() && it.toolCalls.isNotEmpty() && !it.isError }) out[out.lastIndex] = prev + m
+            else out += listOf(m)
         }
+        out
+    }
+    LazyColumn(state = state, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        items(groups, key = { it.first().id }) { g ->
+            val m = g.first()
+            val isLast = g.last().id == visible.last().id
+            when {
+                m.role == Role.USER -> UserBubble(m)
+                m.text.isBlank() && m.toolCalls.isNotEmpty() && !m.isError -> ToolRun(g, results, pending, busy = streaming, onDecide)
+                else -> AssistantBlock(m, isLast, streaming && isLast, streaming, results, pending, onDecide, onRegenerate)
+            }
+        }
+    }
+}
+
+/**
+ * Several tool steps in a row, folded to "Ran N steps ›". Opens by itself while a step waits for approval or is running;
+ * files the steps produced (images, documents, APKs) always stay visible.
+ */
+@Composable
+private fun ToolRun(msgs: List<ChatMessage>, results: Map<String?, ChatMessage>, pending: ToolCall?, busy: Boolean, onDecide: (ChatViewModel.Approval) -> Unit) {
+    val calls = msgs.flatMap { it.toolCalls }
+    val active = calls.any { c -> pending?.id == c.id || (busy && results[c.id] == null) }
+    var open by rememberSaveable(msgs.first().id) { mutableStateOf(false) }
+    val failed = calls.count { results[it.id]?.isError == true }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        msgs.forEach { m -> if (m.thinking.isNotBlank()) ThinkingBlock(m.thinking, live = false) }
+        Row(Modifier.clip(RoundedCornerShape(8.dp)).clickable { open = !open }.padding(vertical = 4.dp, horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (active) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Build, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.size(8.dp))
+            Text((if (active) "Working · " else "Ran ") + "${calls.size} step${if (calls.size == 1) "" else "s"}" +
+                (if (failed > 0) " · $failed failed" else "") + " · " + calls.joinToString(", ") { toolTitle(it.name) }.take(60),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false))
+            Icon(if (open || active) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.ArrowForward, if (open) "Hide steps" else "Show steps", Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (open || active) calls.forEach { c ->
+            ToolCard(c, results[c.id], awaiting = pending?.id == c.id, running = busy && results[c.id] == null && pending?.id != c.id, onDecide)
+        } else calls.forEach { c -> results[c.id]?.attachments?.forEach { AttachmentCard(it) } }
     }
 }
 
@@ -307,6 +351,13 @@ private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String, Bool
                      pending: List<app.switchboard.data.Attachment> = emptyList(), attaching: Boolean = false,
                      onAttach: (List<android.net.Uri>) -> Unit = {}, onRemove: (app.switchboard.data.Attachment) -> Unit = {}) {
     var text by rememberSaveable { mutableStateOf("") }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    // Voice: the phone's speech recognizer turns speech into text in the message box.
+    val speech = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { r ->
+        r.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { said ->
+            text = if (text.isBlank()) said else text.trimEnd() + " " + said
+        }
+    }
     // Any file type, several at once.
     val pick = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { onAttach(it) }
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)) {
@@ -338,7 +389,14 @@ private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String, Bool
                 ),
                 shape = RoundedCornerShape(20.dp),
             )
-            Spacer(Modifier.size(8.dp))
+            if (!streaming) IconButton(enabled = enabled, onClick = {
+                runCatching {
+                    speech.launch(android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                        .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Speak your message"))
+                }.onFailure { android.widget.Toast.makeText(ctx, "No speech recognizer on this phone (install Google or another voice keyboard).", android.widget.Toast.LENGTH_LONG).show() }
+            }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Mic, "Speak your message") }
+            Spacer(Modifier.size(4.dp))
             if (streaming) {
                 FilledIconButton(onClick = onStop, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, "Stop generating") }
             } else {

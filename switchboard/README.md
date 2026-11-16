@@ -106,6 +106,12 @@ Everything below is in **Settings**, at the top of the page.
 - **Rename chats**: tap the pencil next to a chat in the side menu. You can move it into or out of a project there too.
 - **Scheduled tasks**: once, every N hours, daily or weekly, in your time zone, with an optional project and agent. Runs use Android's background job scheduler, so they work with the app closed. Each run is saved as a chat and you get a notification. Tools and connectors run without asking only if you turn on "Allow tools and connectors" for that task. With Tools on, the model can schedule tasks too (`schedule_task`).
 
+## Layout
+- **Wide screens** (an unfolded Fold, tablets, landscape): the chat list stays open on the left, beside the chat. ☰ hides or shows it. Phones use a slide-out list.
+- **Chat list**: search (titles and message text), projects at the top, then recent chats, each with when it was last active ("8h", "1d", "20 Oct") and its project, or the provider and model that last answered. Long-press a chat to rename, move or delete it. **New chat** is at the bottom.
+- **Tool steps** fold into one line ("Ran 3 steps · Run command, Write file"), which you tap to open. It opens by itself while a step waits for approval or is running, and files the steps made stay visible.
+- **🎤 voice input** next to the message box uses the phone's speech recognizer.
+
 ## Attaching files (+ button or Share)
 Tap **+** next to the message box (any file type, several at once), or share files into Switchboard from other apps. They show as chips until you send.
 - **Images** are converted to JPEG (≤1568 px, so HEIC and huge photos work) and sent for the model to see. **PDFs** are sent as documents (Claude, OpenAI, OpenRouter).

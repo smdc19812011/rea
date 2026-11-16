@@ -13,6 +13,13 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import app.switchboard.ui.ChatListPanel
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -92,13 +99,32 @@ class MainActivity : ComponentActivity() {
                 if (page != null) { ManagePage(vm, page!!, onBack = { page = null }); return@SwitchboardTheme }
                 if (showSettings) { SettingsScreen(vm, onBack = { showSettings = false }, onOpen = { page = it }); return@SwitchboardTheme }
 
-                ModalNavigationDrawer(drawerState = drawer, drawerContent = {
+                // Wide screens (unfolded Fold, tablets, landscape): chat list stays open beside the chat; ☰ hides/shows it.
+                val wide = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp >= 700
+                var paneOpen by rememberSaveable { mutableStateOf(true) }
+                val openProjects = { showSettings = true; page = Pages.PROJECTS }
+                if (wide) {
+                    Row(Modifier.fillMaxSize()) {
+                        androidx.compose.animation.AnimatedVisibility(paneOpen) {
+                            androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.surfaceContainer,
+                                modifier = Modifier.width(340.dp).fillMaxHeight()) {
+                                ChatListPanel(vm, onPick = { vm.open(it) }, onNew = { vm.newChat(it) }, onRename = { renaming = it },
+                                    onManageProjects = openProjects, onSettings = { showSettings = true },
+                                    modifier = Modifier.statusBarsPadding().navigationBarsPadding())
+                            }
+                        }
+                        Box(Modifier.weight(1f)) {
+                            ChatScreen(vm, onMenu = { paneOpen = !paneOpen }, onSettings = { showSettings = true }, onPickModel = { showModels = true })
+                        }
+                    }
+                } else ModalNavigationDrawer(drawerState = drawer, drawerContent = {
                     ModalDrawerSheet {
-                        Drawer(vm,
+                        ChatListPanel(vm,
                             onPick = { vm.open(it); scope.launch { drawer.close() } },
                             onNew = { projectId -> vm.newChat(projectId); scope.launch { drawer.close() } },
                             onRename = { renaming = it },
-                            onManageProjects = { showSettings = true; page = Pages.PROJECTS; scope.launch { drawer.close() } })
+                            onManageProjects = { openProjects(); scope.launch { drawer.close() } },
+                            onSettings = { showSettings = true; scope.launch { drawer.close() } })
                     }
                 }) {
                     ChatScreen(vm, onMenu = { scope.launch { drawer.open() } }, onSettings = { showSettings = true }, onPickModel = { showModels = true })
@@ -139,59 +165,6 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-}
-
-@Composable
-private fun Drawer(vm: ChatViewModel, onPick: (String) -> Unit, onNew: (String?) -> Unit, onRename: (Conversation) -> Unit, onManageProjects: () -> Unit) {
-    val projects = vm.settings.projects
-    var expanded by rememberSaveable { mutableStateOf(setOf<String>()) }
-    Text("Switchboard", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(20.dp))
-    ExtendedFloatingActionButton(onClick = { onNew(null) }, icon = { Icon(Icons.Default.Add, null) }, text = { Text("New chat") },
-        modifier = Modifier.padding(horizontal = 16.dp))
-    Spacer(Modifier.size(8.dp))
-    LazyColumn {
-        item {
-            Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 12.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Projects", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
-                TextButton(onClick = onManageProjects) { Text(if (projects.isEmpty()) "New" else "Manage") }
-            }
-        }
-        projects.forEach { p ->
-            val open = p.id in expanded
-            item(key = "p-" + p.id) {
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Folder, null) },
-                    label = { Text(p.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    badge = {
-                        Row {
-                            IconButton(onClick = { onNew(p.id) }) { Icon(Icons.Default.Add, "New chat in ${p.name}") }
-                            Icon(if (open) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
-                        }
-                    },
-                    selected = false, onClick = { expanded = if (open) expanded - p.id else expanded + p.id },
-                    modifier = Modifier.padding(horizontal = 12.dp))
-            }
-            if (open) items(vm.conversations.filter { it.projectId == p.id }, key = { it.id }) { c -> ChatRow(vm, c, indent = true, onPick, onRename) }
-        }
-        item { Text("Chats", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(start = 24.dp, top = 12.dp, bottom = 4.dp)) }
-        val loose = vm.conversations.filter { c -> c.projectId == null || projects.none { it.id == c.projectId } }
-        if (loose.isEmpty()) item { Text("No chats yet", Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        items(loose, key = { it.id }) { c -> ChatRow(vm, c, indent = false, onPick, onRename) }
-    }
-}
-
-@Composable
-private fun ChatRow(vm: ChatViewModel, c: Conversation, indent: Boolean, onPick: (String) -> Unit, onRename: (Conversation) -> Unit) {
-    NavigationDrawerItem(
-        label = { Text(c.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        badge = {
-            Row {
-                IconButton(onClick = { onRename(c) }) { Icon(Icons.Default.Edit, "Rename ${c.title}") }
-                IconButton(onClick = { vm.delete(c.id) }) { Icon(Icons.Default.Close, "Delete ${c.title}") }
-            }
-        },
-        selected = c.id == vm.current.id, onClick = { onPick(c.id) },
-        modifier = Modifier.padding(start = if (indent) 32.dp else 12.dp, end = 12.dp))
 }
 
 @Composable
