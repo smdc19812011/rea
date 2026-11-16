@@ -24,6 +24,7 @@ class Store(context: Context) {
             runnerToken = SecretBox.decrypt(raw.runnerToken),
             termuxToken = SecretBox.decrypt(raw.termuxToken),
             connectors = raw.connectors.map { it.copy(auth = it.auth.mapSecrets(SecretBox::decrypt)) },
+            packages = raw.packages.map { it.copy(token = SecretBox.decrypt(it.token)) },
         )
     }
 
@@ -33,6 +34,7 @@ class Store(context: Context) {
             runnerToken = SecretBox.encrypt(s.runnerToken),
             termuxToken = SecretBox.encrypt(s.termuxToken),
             connectors = s.connectors.map { it.copy(auth = it.auth.mapSecrets(SecretBox::encrypt)) },
+            packages = s.packages.map { it.copy(token = SecretBox.encrypt(it.token)) },
         )
         atomicWrite(settingsFile, json.encodeToString(AppSettings.serializer(), enc))
     }

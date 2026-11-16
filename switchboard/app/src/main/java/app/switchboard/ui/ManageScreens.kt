@@ -78,13 +78,14 @@ object Pages {
     const val AGENTS = "agents"
     const val PROJECTS = "projects"
     const val TASKS = "tasks"
+    const val TOOLBOX = "toolbox"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ManagePage(vm: ChatViewModel, page: String, onBack: () -> Unit) {
     val title = mapOf(Pages.CONNECTORS to "Connectors", Pages.SKILLS to "Skills", Pages.AGENTS to "Agents",
-        Pages.PROJECTS to "Projects", Pages.TASKS to "Scheduled tasks")[page] ?: page
+        Pages.PROJECTS to "Projects", Pages.TASKS to "Scheduled tasks", Pages.TOOLBOX to "Toolbox")[page] ?: page
     Scaffold(topBar = {
         TopAppBar(title = { Text(title) }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } })
     }) { pad ->
@@ -95,6 +96,7 @@ fun ManagePage(vm: ChatViewModel, page: String, onBack: () -> Unit) {
                 Pages.AGENTS -> AgentsPage(vm)
                 Pages.PROJECTS -> ProjectsPage(vm)
                 Pages.TASKS -> TasksPage(vm)
+                Pages.TOOLBOX -> ToolboxPage(vm)
             }
         }
     }
@@ -427,5 +429,110 @@ private fun TaskDialog(vm: ChatViewModel, t: ScheduledTask, onDismiss: () -> Uni
         AlertDialog(onDismissRequest = { pickTime = false }, text = { TimePicker(state) },
             confirmButton = { TextButton(onClick = { time = LocalTime.of(state.hour, state.minute); pickTime = false }) { Text("OK") } },
             dismissButton = { TextButton(onClick = { pickTime = false }) { Text("Cancel") } })
+    }
+}
+
+
+// ---------- toolbox ----------
+
+@Composable
+private fun ToolboxPage(vm: ChatViewModel) {
+    val s = vm.settings
+    val mode = s.runnerMode
+    val machine = when (mode) { app.switchboard.data.RunnerMode.PHONE -> "this phone"; app.switchboard.data.RunnerMode.TERMUX -> "Termux"; app.switchboard.data.RunnerMode.REMOTE -> "your computer" }
+    var adding by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<app.switchboard.data.ToolPackage?>(null) }
+    var deleting by remember { mutableStateOf<app.switchboard.data.ToolPackage?>(null) }
+    var openLog by remember { mutableStateOf<String?>(null) }
+    Hint("Tools installed once on $machine (where Tools run; change it in Settings > Tools). Chats, agents, skills and scheduled tasks are told what's installed and where, so they use these instead of downloading again.")
+    if (!s.toolsEnabled) Text("Turn on Tools in Settings so the model can use these.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+    if (mode == app.switchboard.data.RunnerMode.PHONE) Hint("On this phone, only GitHub repositories and download links can be installed. Packages (Python, Java, compilers…) need Termux or Computer mode.")
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilledTonalButton(onClick = { adding = true }) { Text("Add common tools") }
+        OutlinedButton(onClick = { editing = app.switchboard.data.ToolPackage(name = "", source = "") }) { Text("Add your own") }
+    }
+    if (s.packages.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = vm::installAll) { Text("Install all missing") }
+        TextButton(onClick = vm::checkPackages) { Text("Check what's installed") }
+    } else Hint("Nothing in the toolbox yet.")
+    s.packages.forEach { p ->
+        HorizontalDivider()
+        val st = p.installs[mode.name]
+        val busy = vm.installing[p.id]
+        ListItem(
+            headlineContent = { Text(p.name) },
+            supportingContent = {
+                Column {
+                    Text("${app.switchboard.engine.Toolbox.kindOf(p).name.lowercase()} · ${p.source.lineSequence().first().take(70)}", maxLines = 1)
+                    when {
+                        busy != null -> Text(busy, color = MaterialTheme.colorScheme.primary)
+                        st == null -> Text("Not installed on $machine")
+                        st.ok -> Text("✓ Installed${if (st.location.isNotBlank()) " at ${st.location}" else ""}", color = MaterialTheme.colorScheme.primary)
+                        else -> Text("✗ ${st.log.lineSequence().lastOrNull { it.isNotBlank() }?.take(120) ?: "Failed"}", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            trailingContent = { RowActions({ editing = p }, { deleting = p }, p.name) },
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(start = 16.dp)) {
+            FilledTonalButton(enabled = busy == null, onClick = { vm.installPackage(p.id) }) { Text(if (st?.ok == true) "Update" else "Install") }
+            if (st != null && st.log.isNotBlank()) TextButton(onClick = { openLog = if (openLog == p.id) null else p.id }) { Text(if (openLog == p.id) "Hide log" else "Log") }
+            if (st?.ok == true && app.switchboard.engine.Toolbox.kindOf(p) in setOf(app.switchboard.data.PackageKind.GIT, app.switchboard.data.PackageKind.URL))
+                TextButton(onClick = { vm.deletePackageFiles(p.id) }) { Text("Delete files") }
+        }
+        if (openLog == p.id) Text(st?.log.orEmpty(), style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            modifier = Modifier.padding(start = 16.dp))
+    }
+    if (adding) PresetPicker(vm, onDismiss = { adding = false })
+    editing?.let { p -> PackageDialog(p, s.packages.none { it.id == p.id }, onSave = { vm.upsertPackage(it); editing = null; vm.installPackage(it.id) }, onDismiss = { editing = null }) }
+    deleting?.let { p -> ConfirmDelete("${p.name} from the toolbox (installed files stay unless you tap Delete files first)", { vm.removePackage(p.id) }) { deleting = null } }
+}
+
+@Composable
+private fun PresetPicker(vm: ChatViewModel, onDismiss: () -> Unit) {
+    val existing = vm.settings.packages.map { it.name }.toSet()
+    val presets = remember(vm.settings.runnerMode) { app.switchboard.engine.Toolbox.presets(vm.settings.runnerMode).filter { it.name !in existing } }
+    var picked by remember { mutableStateOf(setOf<String>()) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Add common tools") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                if (presets.isEmpty()) Hint("Everything available for this machine is already in your toolbox.")
+                presets.forEach { p ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.Checkbox(checked = p.name in picked, onCheckedChange = { picked = if (it) picked + p.name else picked - p.name })
+                        Column(Modifier.weight(1f)) { Text(p.name); Hint(p.description) }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(enabled = picked.isNotEmpty(), onClick = {
+            presets.filter { it.name in picked }.forEach { vm.upsertPackage(it); vm.installPackage(it.id) }
+            onDismiss()
+        }) { Text("Add and install") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+@Composable
+private fun PackageDialog(initial: app.switchboard.data.ToolPackage, isNew: Boolean, onSave: (app.switchboard.data.ToolPackage) -> Unit, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf(initial.name) }
+    var source by remember { mutableStateOf(initial.source) }
+    var kind by remember { mutableStateOf(initial.kind) }
+    var desc by remember { mutableStateOf(initial.description) }
+    var token by remember { mutableStateOf(initial.token) }
+    val detected = app.switchboard.engine.Toolbox.detect(source)
+    EditDialog(if (isNew) "Add a tool" else "Edit ${initial.name}", name.isNotBlank() && source.isNotBlank(),
+        onSave = { onSave(initial.copy(name = name.trim(), source = source.trim(), kind = kind, description = desc.trim(), token = token.trim(),
+            // custom edits replace any preset commands
+            scripts = if (source.trim() == initial.source) initial.scripts else emptyMap(), checks = if (source.trim() == initial.source) initial.checks else emptyMap())) },
+        onDismiss = onDismiss) {
+        Field(name, { name = it }, "Name", placeholder = "e.g. My firmware repo")
+        Field(source, { source = it }, "Source address", minLines = 2, placeholder = "https://github.com/user/repo, https://…/file.zip, ffmpeg, pip:requests, npm:typescript, or a shell script")
+        Picker("Type", listOf(app.switchboard.data.PackageKind.AUTO to "Automatic (${detected.name.lowercase()})",
+            app.switchboard.data.PackageKind.GIT to "Git repository", app.switchboard.data.PackageKind.URL to "Download link (archives are unpacked)",
+            app.switchboard.data.PackageKind.PACKAGE to "System package (pkg / apt / brew)", app.switchboard.data.PackageKind.PIP to "Python package (pip)",
+            app.switchboard.data.PackageKind.NPM to "Node package (npm)", app.switchboard.data.PackageKind.SCRIPT to "Install script (shell commands)"), kind) { kind = it }
+        Field(desc, { desc = it }, "What it is (shown to the model, optional)")
+        if ((if (kind == app.switchboard.data.PackageKind.AUTO) detected else kind) in setOf(app.switchboard.data.PackageKind.GIT, app.switchboard.data.PackageKind.URL))
+            Field(token, { token = it }, "Access token for private sources (optional)", secret = true)
     }
 }

@@ -41,6 +41,9 @@ import app.switchboard.data.Skill
 import app.switchboard.engine.AgentRunner
 import app.switchboard.engine.Extras
 import app.switchboard.engine.FileTools
+import app.switchboard.engine.Toolbox
+import app.switchboard.data.ToolPackage
+import app.switchboard.data.InstallState
 import app.switchboard.build.DocMaker
 import app.switchboard.build.PdfMaker
 import app.switchboard.net.MediaGen
@@ -591,6 +594,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (toolsAllowed && settings.toolsEnabled) {
             val (note, specs) = machineTools()
             sys += note; tools += specs
+            sys += Toolbox.note(settings.packages, settings.runnerMode)
             tools += listOf(Extras.createSkill, Extras.createAgent, Extras.scheduleTask)
             sys += "You can also save skills (create_skill), create agents (create_agent) and schedule prompts to run later or on repeat (schedule_task) when the user asks."
         }
@@ -642,6 +646,98 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             Keep commands non-interactive. Builds can take several minutes; set timeout_sec accordingly.
         """.trimIndent()
         return toolNote to (Runner.tools + DeviceManager.tools(includeDownload = settings.runnerMode == RunnerMode.PHONE) + listOfNotNull(BUILD_APK_SPEC.takeIf { settings.runnerMode == RunnerMode.PHONE }))
+    }
+
+    // --- toolbox: tools installed once on the tool machine ---
+
+    /** Package id -> progress text while it installs. */
+    var installing by mutableStateOf(mapOf<String, String>()); private set
+
+    fun upsertPackage(p: ToolPackage) = updateSettings { s -> s.copy(packages = s.packages.map { if (it.id == p.id) p else it }.let { l -> if (l.any { it.id == p.id }) l else l + p }) }
+    fun removePackage(id: String) = updateSettings { s -> s.copy(packages = s.packages.filterNot { it.id == id }) }
+
+    private fun record(id: String, state: InstallState) =
+        updateSettings { s -> s.copy(packages = s.packages.map { if (it.id == id) it.copy(installs = it.installs + (s.runnerMode.name to state)) else it }) }
+
+    private suspend fun shell(command: String, timeoutSec: Int): Pair<Boolean, String> {
+        val r = host().execute(ToolCall("toolbox", "run_command", kotlinx.serialization.json.buildJsonObject {
+            put("command", command); put("timeout_sec", timeoutSec)
+        }.toString()))
+        return (!r.isError && r.text.startsWith("Exit code 0")) to r.text
+    }
+
+    /** Installs (or updates) one tool on the current tool machine. */
+    fun installPackage(id: String) {
+        val p = settings.packages.firstOrNull { it.id == id } ?: return
+        if (id in installing) return
+        installing = installing + (id to "Installing…")
+        WorkService.start(getApplication(), "Installing ${p.name}")
+        viewModelScope.launch {
+            val state = try {
+                when (val mode = settings.runnerMode) {
+                    RunnerMode.PHONE -> withContext(Dispatchers.IO) {
+                        val dir = Toolbox.phoneInstall(p, File(getApplication<Application>().filesDir, "workspace/tools"))
+                        InstallState(System.currentTimeMillis(), true, dir.path, "Downloaded to ${dir.path}")
+                    }
+                    else -> {
+                        describeHost() // starts the Termux runner if needed
+                        var tokenFile: String? = null
+                        if (p.token.isNotBlank() && Toolbox.kindOf(p) in setOf(app.switchboard.data.PackageKind.GIT, app.switchboard.data.PackageKind.URL)) {
+                            tokenFile = ".switchboard-token-${p.id.take(8)}"
+                            host().execute(ToolCall("toolbox", "write_file", kotlinx.serialization.json.buildJsonObject {
+                                put("path", "~/$tokenFile"); put("content", Toolbox.authHeader(p.token))
+                            }.toString()))
+                            tokenFile = "\$HOME/$tokenFile"
+                        }
+                        val script = Toolbox.installScript(p, mode, tokenFile) ?: error("This tool can't be installed on ${mode.name.lowercase()}.")
+                        val (ok, out) = shell(script, 3600)
+                        val loc = Toolbox.location(out)
+                        InstallState(System.currentTimeMillis(), ok, loc, out.takeLast(4000))
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e
+            } catch (e: Exception) { InstallState(System.currentTimeMillis(), false, "", e.message ?: "Failed") }
+            record(id, state)
+            installing = installing - id
+            if (installing.isEmpty()) WorkService.stop(getApplication())
+        }
+    }
+
+    fun installAll() = settings.packages.filter { it.installs[settings.runnerMode.name]?.ok != true }.forEach { installPackage(it.id) }
+
+    /** Marks tools that are already on the machine as installed, without reinstalling anything. */
+    fun checkPackages() {
+        val mode = settings.runnerMode
+        viewModelScope.launch {
+            runCatching { if (mode != RunnerMode.PHONE) describeHost() }
+            for (p in settings.packages) {
+                installing = installing + (p.id to "Checking…")
+                val state = runCatching {
+                    if (mode == RunnerMode.PHONE) {
+                        val dir = File(getApplication<Application>().filesDir, "workspace/tools/${Toolbox.slug(p.name)}")
+                        InstallState(System.currentTimeMillis(), dir.isDirectory && (dir.list()?.isNotEmpty() == true), dir.path.takeIf { dir.isDirectory }.orEmpty())
+                    } else {
+                        val check = Toolbox.checkScript(p, mode) ?: return@runCatching null
+                        val (ok, out) = shell(check, 60)
+                        InstallState(System.currentTimeMillis(), ok, Toolbox.location(out), if (ok) "Found" else "Not found")
+                    }
+                }.getOrNull()
+                if (state != null && (state.ok || p.installs[mode.name]?.ok == true)) record(p.id, state)
+                installing = installing - p.id
+            }
+        }
+    }
+
+    /** Deletes a git/URL tool's folder from the machine (packages are left to the system package manager). */
+    fun deletePackageFiles(id: String) {
+        val p = settings.packages.firstOrNull { it.id == id } ?: return
+        viewModelScope.launch {
+            runCatching {
+                if (settings.runnerMode == RunnerMode.PHONE) withContext(Dispatchers.IO) { File(getApplication<Application>().filesDir, "workspace/tools/${Toolbox.slug(p.name)}").deleteRecursively() }
+                else shell("rm -rf \"${Toolbox.runnerDir(p)}\"", 120)
+            }
+            record(id, InstallState(System.currentTimeMillis(), false, "", "Removed"))
+        }
     }
 
     // --- file generation ---

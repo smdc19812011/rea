@@ -144,6 +144,7 @@ class TaskWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             RunnerMode.REMOTE -> Runner(s.runnerUrl, s.runnerToken, s.unrestricted)
         }
         val system = listOf(s.systemPrompt, agent?.systemPrompt.orEmpty(), Extras.projectNote(project), Extras.skillsNote(s.skills), Extras.timeNote(zone),
+            if (t.allowTools && s.toolsEnabled) Toolbox.note(s.packages, s.runnerMode) else "",
             "This is a scheduled task (\"${t.name}\") running in the background; nobody is watching, so finish the job and end with a short summary.")
             .filter { it.isNotBlank() }.joinToString("\n\n")
         val opts = RequestOptions(system = system, maxTokens = s.maxTokens, unrestricted = s.unrestricted, tools = tools)

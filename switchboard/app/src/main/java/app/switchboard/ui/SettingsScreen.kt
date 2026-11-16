@@ -101,6 +101,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit, onOpen: (String) -> Un
                 Triple(Pages.AGENTS, "Agents", "Assistants with their own prompt and model · ${st.agents.size}"),
                 Triple(Pages.PROJECTS, "Projects", "Chats with shared instructions and files · ${st.projects.size}"),
                 Triple(Pages.TASKS, "Scheduled tasks", "Prompts that run on their own · ${st.tasks.size}"),
+                Triple(Pages.TOOLBOX, "Toolbox", "Tools installed once and reused · ${st.packages.count { it.installs[st.runnerMode.name]?.ok == true }}/${st.packages.size}"),
             ).forEach { (page, title, sub) ->
                 ListItem(headlineContent = { Text(title) }, supportingContent = { Text(sub) },
                     trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },

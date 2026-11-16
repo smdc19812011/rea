@@ -27,6 +27,33 @@ data class Provider(
     val chatOrder: List<String> get() = (listOf(model) + chatModels).filter { it.isNotBlank() }.distinct()
 }
 
+/** How a toolbox entry is installed. AUTO decides from the source address. */
+@Serializable
+enum class PackageKind { AUTO, PACKAGE, PIP, NPM, GIT, URL, SCRIPT }
+
+@Serializable
+data class InstallState(val at: Long, val ok: Boolean, val location: String = "", val log: String = "")
+
+/**
+ * A tool installed once on the tool machine so chats, agents, skills and tasks reuse it instead of downloading it again.
+ * [scripts]/[checks] hold per-machine commands for built-in presets (keyed by RunnerMode name).
+ */
+@Serializable
+data class ToolPackage(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val kind: PackageKind = PackageKind.AUTO,
+    /** Package name, git repo URL, download URL, or the script itself. */
+    val source: String,
+    val description: String = "",
+    /** Optional access token for private repos/downloads; encrypted at rest. */
+    val token: String = "",
+    val scripts: Map<String, String> = emptyMap(),
+    val checks: Map<String, String> = emptyMap(),
+    /** Install results per machine (PHONE, TERMUX, REMOTE). */
+    val installs: Map<String, InstallState> = emptyMap(),
+)
+
 /** What a task needs from a model. */
 @Serializable
 enum class Task { CHAT, IMAGE, AUDIO, VIDEO }
@@ -209,6 +236,7 @@ data class AppSettings(
     val agents: List<Agent> = emptyList(),
     val projects: List<Project> = emptyList(),
     val tasks: List<ScheduledTask> = emptyList(),
+    val packages: List<ToolPackage> = emptyList(),
     /** Offer generate_image, create_document and text_to_speech to the model. */
     val fileTools: Boolean = true,
     /** Send messages that clearly ask for a picture straight to the image model (doesn't rely on the chat model using tools). */

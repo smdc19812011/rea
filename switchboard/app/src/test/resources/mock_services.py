@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Mock MCP server + OAuth authorization server + REST API + OpenAI-style chat endpoint for Switchboard's unit tests."""
-import json, sys, urllib.parse
+import io, json, sys, urllib.parse, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
 BASE = f"http://127.0.0.1:{PORT}"
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+def make_zip(files):
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        for name, data in files.items(): z.writestr(name, data)
+    return b.getvalue()
+TOOL_ZIP = make_zip({"bin/hello.sh": "echo hello"})
+REPO_ZIP = make_zip({"owner-repo-abc123/": "", "owner-repo-abc123/README.md": "# repo", "owner-repo-abc123/src/main.py": "print(1)"})
 STATS = {"refreshes": 0, "token_calls": 0, "chat_calls": 0}
 
 class H(BaseHTTPRequestHandler):
@@ -30,6 +37,13 @@ class H(BaseHTTPRequestHandler):
             if self.headers.get("X-API-Key") != "k": return self.send(401, {"error": "bad key"})
             return self.send(200, {"items": ["a", "b"], "q": urllib.parse.parse_qs(u.query).get("q", [""])[0]})
         if u.path == "/stats": return self.send(200, STATS)
+        if u.path == "/files/tool.zip": return self.send(200, raw=TOOL_ZIP, ctype="application/zip")
+        if u.path == "/files/private.zip":
+            if self.headers.get("Authorization", "") != "Basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0": return self.send(401, {"error": "auth"})
+            return self.send(200, raw=TOOL_ZIP, ctype="application/zip")
+        if u.path == "/repos/owner/repo/zipball":
+            if self.headers.get("Authorization") != "Bearer secret": return self.send(404, {"message": "Not Found"})
+            return self.send(200, raw=REPO_ZIP, ctype="application/zip")
         if u.path == "/v1/models":  # OpenRouter-style listing with capabilities and prices
             return self.send(200, {"data": [
                 {"id": "text/model", "name": "Text", "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}, "pricing": {"prompt": "0.000001", "completion": "0.000002"}, "context_length": 128000},

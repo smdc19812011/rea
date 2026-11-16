@@ -72,6 +72,13 @@ These tools always run on the phone, because that's where the hardware is:
 Android asks for USB access per device and for Bluetooth permission the first time. Listing, reading and closing don't need approval; connecting, writing, HTTP and downloads follow "Ask before each action".
 Android apps can't load kernel drivers, so USB-serial chips are driven from user space, and other USB devices go through `usb_raw`. To install compilers, SDKs and other tools, use Termux or Computer mode (`pkg install`, `pip`, and so on). The phone sandbox can't run downloaded programs.
 
+## Toolbox (preinstalled tools)
+Settings, then **Toolbox**: tools installed once on the machine where Tools run, then reused.
+- **Add common tools**: a checklist matched to the machine. In Termux and on a computer: Python, Node.js, Git, Java 17, Android build tools (Termux) or the Android SDK command-line tools (computer: platform 35 and build-tools 35), C/C++, Go, Rust, FFmpeg, ImageMagick, Pandoc, SQLite, esptool, arduino-cli. Everywhere: the **rea** GitHub repo.
+- **Add your own**: give it a name and a source address. The type is detected automatically: git repo, download link (zip/tar unpacked), system package, `pip:`/`npm:` package, or an install script. Private repos and downloads can use an access token, which is passed through a temporary file and never appears in the command.
+- Tools go in `~/switchboard-tools/<name>` (Termux/computer), or `workspace/tools/<name>` on the phone (GitHub repos and downloads only). "Check what's installed" detects existing tools without reinstalling, and Install/Update runs again to update.
+- Chats, agents, skills and scheduled tasks (with tools allowed) are told what's installed and where, so the model uses those copies instead of downloading again.
+
 ## Models by priority
 Edit a provider and tap **Detect available models**: Switchboard lists every model your API key can use. OpenRouter also reports what each model outputs and whether it's free; for other providers this is guessed from the name. For each task (**Chat, Image, Audio, Video**), add models and order them with the arrows.
 - **Chat**: the model in use answers. If it fails (unavailable, out of credits, rate-limited, overloaded), the next one takes over with the full conversation. Switch quickly in the model menu (tap the model name).
