@@ -81,7 +81,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, onPickModel: () -> Unit) {
+/** [showSettings] is off while the side chat list (which has its own ⚙) is open, so there is only one settings button. */
+fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, onPickModel: () -> Unit, showSettings: Boolean = true) {
     val provider = vm.activeProvider
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val notifPermission = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -115,7 +116,7 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
                         if (provider != null) Icon(Icons.Default.ExpandMore, null, Modifier.size(18.dp))
                     }
                 },
-                actions = { IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Settings") } },
+                actions = { if (showSettings) IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Settings") } },
             )
         },
     ) { pad ->

@@ -13,6 +13,13 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.draggable
 import app.switchboard.ui.ChatListPanel
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -104,17 +111,28 @@ class MainActivity : ComponentActivity() {
                 var paneOpen by rememberSaveable { mutableStateOf(true) }
                 val openProjects = { showSettings = true; page = Pages.PROJECTS }
                 if (wide) {
+                    // Pane width is dragged with the divider and remembered between launches.
+                    val prefs = remember { ctx.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE) }
+                    val screenDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+                    val minPane = 240f; val maxPane = (screenDp * 0.6f).coerceAtLeast(minPane + 40)
+                    var paneWidth by remember { mutableStateOf(prefs.getFloat("paneWidth", 340f).coerceIn(minPane, maxPane)) }
+                    val density = androidx.compose.ui.platform.LocalDensity.current
                     Row(Modifier.fillMaxSize()) {
                         androidx.compose.animation.AnimatedVisibility(paneOpen) {
-                            androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.surfaceContainer,
-                                modifier = Modifier.width(340.dp).fillMaxHeight()) {
-                                ChatListPanel(vm, onPick = { vm.open(it) }, onNew = { vm.newChat(it) }, onRename = { renaming = it },
-                                    onManageProjects = openProjects, onSettings = { showSettings = true },
-                                    modifier = Modifier.statusBarsPadding().navigationBarsPadding())
+                            Row {
+                                androidx.compose.material3.Surface(color = MaterialTheme.colorScheme.surfaceContainer,
+                                    modifier = Modifier.width(paneWidth.dp).fillMaxHeight()) {
+                                    ChatListPanel(vm, onPick = { vm.open(it) }, onNew = { vm.newChat(it) }, onRename = { renaming = it },
+                                        onManageProjects = openProjects, onSettings = { showSettings = true },
+                                        modifier = Modifier.statusBarsPadding().navigationBarsPadding())
+                                }
+                                PaneDivider(onDrag = { px -> paneWidth = (paneWidth + with(density) { px.toDp().value }).coerceIn(minPane, maxPane) },
+                                    onDragEnd = { prefs.edit().putFloat("paneWidth", paneWidth).apply() })
                             }
                         }
                         Box(Modifier.weight(1f)) {
-                            ChatScreen(vm, onMenu = { paneOpen = !paneOpen }, onSettings = { showSettings = true }, onPickModel = { showModels = true })
+                            ChatScreen(vm, onMenu = { paneOpen = !paneOpen }, onSettings = { showSettings = true }, onPickModel = { showModels = true },
+                                showSettings = !paneOpen)
                         }
                     }
                 } else ModalNavigationDrawer(drawerState = drawer, drawerContent = {
@@ -164,6 +182,19 @@ class MainActivity : ComponentActivity() {
                 intent.action = null
             }
         }
+    }
+}
+
+/** The draggable line between the chat list and the chat: a wide invisible touch area with a small visible grip. */
+@Composable
+private fun PaneDivider(onDrag: (Float) -> Unit, onDragEnd: () -> Unit) {
+    Box(Modifier.width(16.dp).fillMaxHeight()
+        .draggable(rememberDraggableState(onDrag), androidx.compose.foundation.gestures.Orientation.Horizontal, onDragStopped = { onDragEnd() })
+        .semantics { contentDescription = "Resize chat list" },
+        contentAlignment = Alignment.Center) {
+        Box(Modifier.fillMaxHeight().width(1.dp).background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)))
+        Box(Modifier.width(6.dp).height(48.dp).clip(androidx.compose.foundation.shape.RoundedCornerShape(3.dp))
+            .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)))
     }
 }
 
