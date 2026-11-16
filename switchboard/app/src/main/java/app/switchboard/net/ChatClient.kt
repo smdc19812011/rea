@@ -34,6 +34,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -53,6 +54,8 @@ data class RequestOptions(
     val unrestricted: Boolean = false,
     val extraBody: JsonObject? = null,
     val tools: List<ToolSpec> = emptyList(),
+    /** Send attached images and PDFs to the model itself (off for models that reject them). */
+    val media: Boolean = true,
 )
 
 /** A model offered by a provider. [outputs] is empty when the provider doesn't say (then the name decides). */
@@ -101,7 +104,7 @@ class ChatClient {
     private val jsonType = "application/json".toMediaType()
 
     fun stream(p: Provider, history: List<ChatMessage>, opts: RequestOptions): Flow<StreamEvent> = callbackFlow {
-        val msgs = normalize(history)
+        val msgs = normalize(history, opts.media)
         val request = when (p.kind) {
             ApiKind.ANTHROPIC -> anthropicRequest(p, msgs, opts)
             ApiKind.OPENAI_COMPATIBLE -> openAiRequest(p, msgs, opts)
@@ -173,7 +176,13 @@ class ChatClient {
         for (m in msgs) {
             val role = if (m.role == Role.ASSISTANT) "assistant" else "user"
             val blocks: List<JsonElement> = when (m.role) {
-                Role.USER -> listOf(textBlock(m.text))
+                Role.USER -> listOfNotNull(textBlock(m.text).takeIf { m.text.isNotBlank() }) + m.attachments.mapNotNull { a ->
+                    val data = runCatching { java.util.Base64.getEncoder().encodeToString(File(a.path).readBytes()) }.getOrNull() ?: return@mapNotNull null
+                    buildJsonObject {
+                        put("type", if (a.mime == "application/pdf") "document" else "image")
+                        putJsonObject("source") { put("type", "base64"); put("media_type", a.mime); put("data", data) }
+                    }
+                }
                 Role.TOOL -> listOf(buildJsonObject {
                     put("type", "tool_result"); put("tool_use_id", safeToolId(m.toolCallId ?: "")); put("content", m.text.ifEmpty { "(no output)" })
                     if (m.isError) put("is_error", true)
@@ -273,7 +282,18 @@ class ChatClient {
             if (opts.system.isNotBlank()) addJsonObject { put("role", "system"); put("content", opts.system) }
             for (m in mergePlain(msgs)) addJsonObject {
                 when (m.role) {
-                    Role.USER -> { put("role", "user"); put("content", m.text) }
+                    Role.USER -> {
+                        put("role", "user")
+                        if (m.attachments.isEmpty()) put("content", m.text) else putJsonArray("content") {
+                            if (m.text.isNotBlank()) addJsonObject { put("type", "text"); put("text", m.text) }
+                            for (a in m.attachments) {
+                                val data = runCatching { java.util.Base64.getEncoder().encodeToString(File(a.path).readBytes()) }.getOrNull() ?: continue
+                                if (a.mime == "application/pdf") addJsonObject {
+                                    put("type", "file"); putJsonObject("file") { put("filename", a.name); put("file_data", "data:application/pdf;base64,$data") }
+                                } else addJsonObject { put("type", "image_url"); putJsonObject("image_url") { put("url", "data:${a.mime};base64,$data") } }
+                            }
+                        }
+                    }
                     Role.TOOL -> { put("role", "tool"); put("tool_call_id", m.toolCallId ?: ""); put("content", m.text.ifEmpty { "(no output)" }) }
                     Role.ASSISTANT -> {
                         put("role", "assistant")
@@ -341,7 +361,7 @@ class ChatClient {
      * Drops failed/empty replies, and makes sure every tool call is answered right after it
      * (a stopped or denied run would otherwise leave an orphan call, which every API rejects).
      */
-    internal fun normalize(history: List<ChatMessage>): List<ChatMessage> {
+    internal fun normalize(history: List<ChatMessage>, media: Boolean = true): List<ChatMessage> {
         val out = mutableListOf<ChatMessage>()
         var pending = listOf<ToolCall>()
         fun flushPending() {
@@ -355,8 +375,8 @@ class ChatClient {
             }
             flushPending()
             if (m.role == Role.ASSISTANT && (m.isError || (m.text.isBlank() && m.toolCalls.isEmpty()))) continue
-            if (m.role == Role.USER && m.text.isBlank()) continue
-            out += m.withAttachmentNote()
+            if (m.role == Role.USER && m.text.isBlank() && m.attachments.isEmpty()) continue
+            out += if (m.role == Role.USER) m.forModel(media) else m.withAttachmentNote()
             if (m.role == Role.ASSISTANT) pending = m.toolCalls
         }
         flushPending()
@@ -368,8 +388,8 @@ class ChatClient {
         val out = mutableListOf<ChatMessage>()
         for (m in msgs) {
             val last = out.lastOrNull()
-            val plain = m.role != Role.TOOL && m.toolCalls.isEmpty()
-            if (last != null && plain && last.role == m.role && last.toolCalls.isEmpty()) out[out.lastIndex] = last.copy(text = last.text + "\n\n" + m.text)
+            val plain = m.role != Role.TOOL && m.toolCalls.isEmpty() && m.attachments.isEmpty()
+            if (last != null && plain && last.role == m.role && last.toolCalls.isEmpty() && last.attachments.isEmpty()) out[out.lastIndex] = last.copy(text = last.text + "\n\n" + m.text)
             else out += m
         }
         return out
@@ -424,6 +444,24 @@ fun ChatMessage.withAttachmentNote(): ChatMessage = if (attachments.isEmpty()) t
     text = (text.trim() + "\n\n" + attachments.joinToString("\n") { "[File shared in this chat: ${it.name} (${it.mime}, ${it.size / 1024} KB)]" }).trim(),
     attachments = emptyList(),
 )
+
+/** Images and PDFs a model can take directly (larger ones are described instead). */
+private val inlineMedia = setOf("image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf")
+
+/**
+ * A user message's files, prepared for the model: images and PDFs stay attached (sent as image/document parts) when
+ * [media] is on; everything else becomes text: the file's extracted contents, or a note with its type and where a copy is.
+ */
+fun ChatMessage.forModel(media: Boolean): ChatMessage {
+    if (attachments.isEmpty()) return this
+    val (keep, describe) = attachments.partition { media && it.mime in inlineMedia && it.size <= 20L * 1024 * 1024 && File(it.path).isFile }
+    val notes = describe.joinToString("\n\n") { a ->
+        val where = a.location?.let { " A copy is on the tool machine at $it." }.orEmpty()
+        if (a.text != null) "--- Attached file: ${a.name} (${a.mime}) ---$where\n${a.text}\n--- end of ${a.name} ---"
+        else "[Attached file: ${a.name} (${a.mime}, ${a.size / 1024} KB).$where Use tools to open or convert it if needed.]"
+    } + keep.joinToString("") { a -> "\n[Attached: ${a.name}${a.location?.let { "; copy at $it" }.orEmpty()}]" }
+    return copy(text = (text.trim() + "\n\n" + notes).trim(), attachments = keep)
+}
 
 /**
  * Anthropic only accepts tool-call IDs made of letters, digits, _ and -. Calls made earlier by another provider

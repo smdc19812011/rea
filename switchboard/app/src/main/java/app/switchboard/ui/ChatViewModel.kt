@@ -204,9 +204,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun send(text: String, asImage: Boolean = false) {
         val providers = nextProviders(currentAgent).ifEmpty { return }
         val trimmed = text.trim()
-        if (trimmed.isEmpty() || streaming) return
+        val files = pendingAttachments
+        if ((trimmed.isEmpty() && files.isEmpty()) || streaming || attaching) return
+        pendingAttachments = emptyList()
         val title = if (current.messages.isEmpty()) trimmed.lineSequence().first().removePrefix("/image").trim().take(48) else current.title
-        current = current.copy(title = title, messages = current.messages + ChatMessage(role = Role.USER, text = trimmed))
+        current = current.copy(title = title.ifBlank { files.firstOrNull()?.name?.take(48) ?: "New chat" },
+            messages = current.messages + ChatMessage(role = Role.USER, text = trimmed, attachments = files))
         val command = Regex("^/(image|img|draw|video)\\s+", RegexOption.IGNORE_CASE).find(trimmed)
         when {
             command != null -> respondWithMedia(trimmed.substring(command.range.last + 1), video = command.groupValues[1].lowercase() == "video")
@@ -426,10 +429,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Models that answered "tools not supported"; they get plain requests from then on (until the app restarts). */
     private val noToolModels = mutableSetOf<String>()
+    /** Models that rejected image/PDF parts; their requests describe files as text instead. */
+    private val noMediaModels = mutableSetOf<String>()
 
     private suspend fun attemptTurn(provider: Provider, opts0: RequestOptions, finalAttempt: Boolean, keepLast: Int? = null, canSwitch: Boolean = false): TurnOutcome {
         var opts = if (provider.model in noToolModels && opts0.tools.isNotEmpty())
             opts0.copy(tools = emptyList(), system = opts0.system + "\n\nTools aren't available with this model, so answer directly.") else opts0
+        if (provider.model in noMediaModels) opts = opts.copy(media = false)
         val full = current.messages
         // Too long for this model: send only the most recent part, starting at a user message.
         val history = if (keepLast == null || keepLast >= full.size) full else {
@@ -471,6 +477,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             if (canSwitch && modelProblem(e) && (!isRetryable(e) || finalAttempt) && !(opts.tools.isNotEmpty() && Regex("(?i)tool|function").containsMatchIn(msg))) {
                 current = current.copy(messages = current.messages.filterNot { it.id == reply.id })
                 return TurnOutcome.SwitchModel(msg)
+            }
+            val hasMedia = opts.media && current.messages.any { m -> m.role == Role.USER && m.attachments.any { it.mime.startsWith("image/") || it.mime == "application/pdf" } }
+            if (hasMedia && e is app.switchboard.net.ApiException && e.httpCode in setOf(400, 404, 413, 415, 422) &&
+                Regex("(?i)image|vision|multimodal|media|file|pdf|document|content.{0,20}(type|part)|modalit").containsMatchIn(msg)) {
+                noMediaModels += provider.model
+                current = current.copy(messages = current.messages.filterNot { it.id == reply.id })
+                return TurnOutcome.Retry("${provider.model} can't read images/PDFs; sending them as file notes")
             }
             if (opts.tools.isNotEmpty() && e is app.switchboard.net.ApiException && e.httpCode in setOf(400, 404, 422) && Regex("(?i)tool|function").containsMatchIn(msg)) {
                 noToolModels += provider.model
@@ -830,6 +843,84 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             record(id, InstallState(System.currentTimeMillis(), false, "", "Removed"))
         }
+    }
+
+    // --- files the user attaches (+ button or share) ---
+
+    var pendingAttachments by mutableStateOf(listOf<Attachment>()); private set
+    var attaching by mutableStateOf(false); private set
+
+    fun removePending(a: Attachment) { pendingAttachments = pendingAttachments - a; File(a.path).delete() }
+
+    /** Copies picked files into the chat and prepares them for any model (see [prepareAttachment]). */
+    fun addAttachments(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            attaching = true
+            try {
+                for (u in uris) {
+                    toolStatus = "Adding ${uris.size} file(s)…"
+                    runCatching { prepareAttachment(u) }.onSuccess { pendingAttachments = pendingAttachments + it }
+                        .onFailure { toolStatus = "Couldn't add a file: ${it.message}"; delay(2500) }
+                }
+            } finally { attaching = false; toolStatus = null }
+        }
+    }
+
+    private val textExtensions = setOf("txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "xml", "html", "htm", "css", "js", "ts", "jsx", "tsx",
+        "kt", "kts", "java", "py", "rb", "go", "rs", "c", "h", "cpp", "hpp", "cs", "swift", "php", "sh", "bash", "zsh", "yaml", "yml", "toml", "ini",
+        "cfg", "conf", "properties", "gradle", "sql", "log", "srt", "vtt", "tex", "ics", "vcf", "svg", "ino", "lua", "r", "dart", "env")
+
+    /**
+     * Images are downsized/converted to JPEG (≤1568 px) so every vision model accepts them; PDFs are kept for models that read
+     * them; text, code and Office files get their text extracted; everything also gets a copy on the tool machine for tools.
+     */
+    private suspend fun prepareAttachment(uri: Uri): Attachment = withContext(Dispatchers.IO) {
+        val ctx = getApplication<Application>()
+        val cr = ctx.contentResolver
+        var name = cr.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            ?: uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+        var mime = cr.getType(uri) ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
+        val dir = attachmentsDir(current.id).apply { mkdirs() }
+        var dest = File(dir, "${java.util.UUID.randomUUID().toString().take(8)}-${name.replace(Regex("[\\\\/:*?\"<>|]"), "_")}")
+        cr.openInputStream(uri)!!.use { input -> dest.outputStream().use { out -> input.copyTo(out) } }
+        if (dest.length() > 100L * 1024 * 1024) { dest.delete(); error("$name is larger than 100 MB.") }
+        val original = dest
+        val ext = name.substringAfterLast('.', "").lowercase()
+        if (mime.startsWith("image/") && mime != "image/svg+xml") {
+            // Re-encode as JPEG, longest side ≤ 1568 px (what vision models work best with); keeps HEIC/large photos usable.
+            runCatching {
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(dest.path, bounds)
+                var sample = 1; while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 3136) sample *= 2
+                val bmp = android.graphics.BitmapFactory.decodeFile(dest.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })!!
+                val scale = minOf(1f, 1568f / maxOf(bmp.width, bmp.height))
+                val out = if (scale < 1f) android.graphics.Bitmap.createScaledBitmap(bmp, (bmp.width * scale).toInt(), (bmp.height * scale).toInt(), true) else bmp
+                val jpg = File(dir, dest.nameWithoutExtension + ".jpg")
+                jpg.outputStream().use { out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, it) }
+                if (jpg != dest) dest.delete()
+                dest = jpg; mime = "image/jpeg"; if (!name.lowercase().endsWith(".jpg")) name = name.substringBeforeLast('.') + ".jpg"
+            }
+        }
+        val text = when {
+            mime.startsWith("text/") || ext in textExtensions || mime in setOf("application/json", "application/xml", "application/javascript", "application/x-sh") ->
+                runCatching { dest.readText().take(150_000) }.getOrNull()?.takeIf { t -> t.count { it == '\u0000' } == 0 }
+            ext in setOf("docx", "xlsx", "pptx") || "officedocument" in mime -> app.switchboard.build.DocText.extract(dest)
+            else -> null
+        }
+        // A copy where tools can reach it: the phone workspace, plus Termux/computer when tools run there.
+        val ws = File(ctx.filesDir, "workspace/uploads").apply { mkdirs() }
+        val local = File(ws, name).also { original.takeIf { it.exists() }?.copyTo(it, overwrite = true) ?: dest.copyTo(it, overwrite = true) }
+        var location: String? = if (settings.runnerMode == RunnerMode.PHONE) local.path else null
+        if (settings.toolsEnabled && settings.runnerMode != RunnerMode.PHONE && local.length() <= 25L * 1024 * 1024) {
+            location = runCatching {
+                val r = host().execute(ToolCall("upload", "write_file", kotlinx.serialization.json.buildJsonObject {
+                    put("path", "uploads/$name"); put("encoding", "base64"); put("content", java.util.Base64.getEncoder().encodeToString(local.readBytes()))
+                }.toString()))
+                if (r.isError) null else Regex("to (.+)\\.$").find(r.text)?.groupValues?.get(1) ?: "uploads/$name"
+            }.getOrNull()
+        }
+        Attachment(name, dest.path, dest.length(), mime, text, location)
     }
 
     // --- file generation ---

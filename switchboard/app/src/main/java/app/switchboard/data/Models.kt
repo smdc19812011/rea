@@ -84,7 +84,13 @@ data class ToolCall(val id: String, val name: String, val arguments: String)
 
 /** A file the model sent into the chat; [path] is the copy in Switchboard's private storage. */
 @Serializable
-data class Attachment(val name: String, val path: String, val size: Long, val mime: String)
+data class Attachment(
+    val name: String, val path: String, val size: Long, val mime: String,
+    /** Text pulled out of the file (text/code files, Word, Excel, PowerPoint) so any model can read it. */
+    val text: String? = null,
+    /** Where a copy lives on the tool machine (workspace/uploads/...), for processing with tools. */
+    val location: String? = null,
+)
 
 @Serializable
 data class ChatMessage(

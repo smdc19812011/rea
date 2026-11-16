@@ -66,6 +66,9 @@ import app.switchboard.net.Runner
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.runtime.remember
@@ -163,7 +166,8 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
             // With several providers taking turns, the counter is for the one answering next.
             val footer = parts.takeIf { it.isNotEmpty() }?.joinToString("   ")?.let { if (vm.rotation.size > 1 && chatProvider != null) "${chatProvider.name}:  $it" else it }
             val exhausted = lim != null && ((lim.perMinute > 0 && minLeft == 0) || (lim.perDay > 0 && dayLeft == 0))
-            Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop, footer = footer, footerWarn = exhausted, imageButton = vm.settings.fileTools)
+            Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop, footer = footer, footerWarn = exhausted, imageButton = vm.settings.fileTools,
+                pending = vm.pendingAttachments, attaching = vm.attaching, onAttach = vm::addAttachments, onRemove = vm::removePending)
         }
     }
 }
@@ -203,8 +207,9 @@ private fun MessageList(
 
 @Composable
 private fun UserBubble(m: ChatMessage) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-        Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        m.attachments.forEach { a -> Box(Modifier.widthIn(max = 320.dp)) { AttachmentCard(a) } }
+        if (m.text.isNotBlank()) Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
             modifier = Modifier.widthIn(max = 320.dp)) {
             SelectionContainer { Text(m.text, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), style = MaterialTheme.typography.bodyLarge) }
         }
@@ -299,12 +304,29 @@ private fun TypingDots() {
 }
 
 @Composable
-private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String, Boolean) -> Unit, onStop: () -> Unit, footer: String? = null, footerWarn: Boolean = false, imageButton: Boolean = false) {
+private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String, Boolean) -> Unit, onStop: () -> Unit, footer: String? = null, footerWarn: Boolean = false,
+                     imageButton: Boolean = false, pending: List<app.switchboard.data.Attachment> = emptyList(), attaching: Boolean = false,
+                     onAttach: (List<android.net.Uri>) -> Unit = {}, onRemove: (app.switchboard.data.Attachment) -> Unit = {}) {
     var text by rememberSaveable { mutableStateOf("") }
     var imageMode by rememberSaveable { mutableStateOf(false) }
+    // Any file type, several at once.
+    val pick = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { onAttach(it) }
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)) {
       Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+        if (pending.isNotEmpty() || attaching) androidx.compose.foundation.lazy.LazyRow(
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(pending, key = { it.path }) { a ->
+                androidx.compose.material3.InputChip(selected = false, onClick = {},
+                    label = { Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 160.dp)) },
+                    leadingIcon = { Icon(if (a.mime.startsWith("image/")) Icons.Default.Image else Icons.Default.Description, null, Modifier.size(16.dp)) },
+                    trailingIcon = { Icon(Icons.Default.Close, "Remove ${a.name}", Modifier.size(16.dp).clickable { onRemove(a) }) })
+            }
+            if (attaching) item { CircularProgressIndicator(Modifier.padding(8.dp).size(18.dp), strokeWidth = 2.dp) }
+        }
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (footer != null) 4.dp else 12.dp), verticalAlignment = Alignment.Bottom) {
+            IconButton(onClick = { pick.launch(arrayOf("*/*")) }, enabled = enabled && !streaming, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Default.Add, "Attach files")
+            }
             if (imageButton) {
                 androidx.compose.material3.IconToggleButton(checked = imageMode, onCheckedChange = { imageMode = it }, modifier = Modifier.size(48.dp)) {
                     Icon(androidx.compose.material.icons.Icons.Default.Palette, if (imageMode) "Image mode on: your message makes a picture" else "Make a picture",
@@ -329,7 +351,7 @@ private fun Composer(enabled: Boolean, streaming: Boolean, onSend: (String, Bool
                 FilledIconButton(onClick = onStop, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, "Stop generating") }
             } else {
                 FilledIconButton(
-                    onClick = { onSend(text, imageMode); text = "" }, enabled = enabled && text.isNotBlank(), modifier = Modifier.size(48.dp),
+                    onClick = { onSend(text, imageMode); text = "" }, enabled = enabled && !attaching && (text.isNotBlank() || pending.isNotEmpty()), modifier = Modifier.size(48.dp),
                     colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
                 ) { Icon(Icons.Default.ArrowUpward, "Send") }
             }

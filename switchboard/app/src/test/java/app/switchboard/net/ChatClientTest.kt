@@ -237,4 +237,29 @@ class ChatClientTest {
         val o = ChatClient().openAiBody(openai, ChatClient().normalize(chat), RequestOptions()).toString()
         assertTrue(o, o.contains("\"tool_call_id\":\"functions.run_command:0\"") && o.contains("[File shared in this chat: icon.png") && o.contains("Now add a dark mode"))
     }
+
+    @Test fun attachedFilesReachTheModel() {
+        val dir = java.nio.file.Files.createTempDirectory("att").toFile()
+        val jpg = java.io.File(dir, "photo.jpg").apply { writeBytes(byteArrayOf(-1, -40, -1, 1, 2, 3)) }
+        val pdf = java.io.File(dir, "spec.pdf").apply { writeBytes("%PDF-1.4 test".toByteArray()) }
+        val msg = ChatMessage(role = Role.USER, text = "Check these", attachments = listOf(
+            app.switchboard.data.Attachment("photo.jpg", jpg.path, jpg.length(), "image/jpeg", location = "/ws/uploads/photo.jpg"),
+            app.switchboard.data.Attachment("spec.pdf", pdf.path, pdf.length(), "application/pdf"),
+            app.switchboard.data.Attachment("data.csv", "/x/data.csv", 20, "text/csv", text = "a,b\n1,2"),
+            app.switchboard.data.Attachment("song.mp3", "/x/song.mp3", 4_000_000, "audio/mpeg", location = "/home/u/switchboard-workspace/uploads/song.mp3"),
+        ))
+        val anthropic = Provider(name = "A", kind = ApiKind.ANTHROPIC, baseUrl = base, apiKey = "k", model = "claude")
+        val a = ChatClient().anthropicBody(anthropic, ChatClient().normalize(listOf(msg)), RequestOptions()).toString()
+        assertTrue(a, a.contains("{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/jpeg\",\"data\":\"/9j/AQID\"}}"))
+        assertTrue(a, a.contains("\"type\":\"document\"") && a.contains("\"media_type\":\"application/pdf\""))
+        assertTrue(a, a.contains("--- Attached file: data.csv (text/csv) ---\\na,b\\n1,2"))
+        assertTrue(a, a.contains("[Attached file: song.mp3 (audio/mpeg, 3906 KB). A copy is on the tool machine at /home/u/switchboard-workspace/uploads/song.mp3."))
+        val openai = Provider(name = "O", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = base, model = "m")
+        val o = ChatClient().openAiBody(openai, ChatClient().normalize(listOf(msg)), RequestOptions()).toString()
+        assertTrue(o, o.contains("{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,/9j/AQID\"}}"))
+        assertTrue(o, o.contains("{\"type\":\"file\",\"file\":{\"filename\":\"spec.pdf\",\"file_data\":\"data:application/pdf;base64,"))
+        // A model that can't take images/PDFs gets notes instead of the binary parts.
+        val plain = ChatClient().openAiBody(openai, ChatClient().normalize(listOf(msg), media = false), RequestOptions()).toString()
+        assertTrue(plain, !plain.contains("image_url") && plain.contains("[Attached file: photo.jpg (image/jpeg") && plain.contains("[Attached file: spec.pdf"))
+    }
 }

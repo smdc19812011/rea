@@ -125,6 +125,19 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data
         if (data?.scheme == "switchboard" && data.host == "oauth") { vm.onOAuthRedirect(data); intent.data = null }
         intent?.getStringExtra("conversationId")?.let { vm.openById(it); intent.removeExtra("conversationId") }
+        // Files shared from other apps become attachments in the open chat.
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                @Suppress("DEPRECATION") val uri = intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+                if (uri != null) vm.addAttachments(listOf(uri))
+                intent.action = null
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                @Suppress("DEPRECATION") val uris = intent.getParcelableArrayListExtra<android.net.Uri>(Intent.EXTRA_STREAM).orEmpty()
+                vm.addAttachments(uris)
+                intent.action = null
+            }
+        }
     }
 }
 
