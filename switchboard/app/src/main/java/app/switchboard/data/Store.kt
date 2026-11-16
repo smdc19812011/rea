@@ -19,7 +19,9 @@ class Store(context: Context) {
         return migrateLimits(raw).let { raw -> raw.copy(
             // Older versions stored only one model: make it the first chat choice.
             providers = raw.providers.map { p ->
-                p.copy(apiKey = SecretBox.decrypt(p.apiKey), chatModels = p.chatModels.ifEmpty { listOfNotNull(p.model.takeIf { it.isNotBlank() }) })
+                p.copy(apiKey = SecretBox.decrypt(p.apiKey), chatModels = p.chatModels.ifEmpty { listOfNotNull(p.model.takeIf { it.isNotBlank() }) },
+                    // Per-model limits (v1.15-1.20) become one limit for the whole provider: the current model's, else the first one set.
+                    limit = if (p.limit.isSet || p.limits.isEmpty()) p.limit else p.limits[p.model] ?: p.limits.values.first(), limits = emptyMap())
             },
             runnerToken = SecretBox.decrypt(raw.runnerToken),
             termuxToken = SecretBox.decrypt(raw.termuxToken),
@@ -33,8 +35,7 @@ class Store(context: Context) {
         if (s.maxPerMinute <= 0 && s.maxPerDay <= 0) return s
         val l = ModelLimit(s.maxPerMinute, s.maxPerDay)
         return s.copy(maxPerMinute = 0, maxPerDay = 0, providers = s.providers.map { p ->
-            val models = (p.chatOrder + p.imageModels + p.audioModels + p.videoModels).distinct()
-            p.copy(limits = models.associateWith { l } + p.limits)
+            p.copy(limit = if (p.limit.isSet) p.limit else l)
         })
     }
 

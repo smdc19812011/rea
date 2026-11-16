@@ -156,10 +156,12 @@ fun ChatScreen(vm: ChatViewModel, onMenu: () -> Unit, onSettings: () -> Unit, on
             val lim = info?.first; val used = info?.second
             val minLeft = if (lim != null && used != null) (lim.perMinute - used.lastMinute).coerceAtLeast(0) else 0
             val dayLeft = if (lim != null && used != null) (lim.perDay - used.today).coerceAtLeast(0) else 0
-            val footer = if (lim == null) null else listOfNotNull(
+            val parts = if (lim == null) emptyList() else listOfNotNull(
                 "$minLeft/${lim.perMinute} remaining min".takeIf { lim.perMinute > 0 },
                 "$dayLeft/${lim.perDay} remaining 24hr".takeIf { lim.perDay > 0 },
-            ).joinToString("   ").ifEmpty { null }
+            )
+            // With several providers taking turns, the counter is for the one answering next.
+            val footer = parts.takeIf { it.isNotEmpty() }?.joinToString("   ")?.let { if (vm.rotation.size > 1 && chatProvider != null) "${chatProvider.name}:  $it" else it }
             val exhausted = lim != null && ((lim.perMinute > 0 && minLeft == 0) || (lim.perDay > 0 && dayLeft == 0))
             Composer(enabled = provider != null, streaming = vm.streaming, onSend = send, onStop = vm::stop, footer = footer, footerWarn = exhausted, imageButton = vm.settings.fileTools)
         }

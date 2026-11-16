@@ -217,4 +217,24 @@ class ChatClientTest {
         val p = Provider(name = "O", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = base, model = "b", chatModels = listOf("a", "b", "c"))
         assertEquals(listOf("b", "a", "c"), p.chatOrder)
     }
+
+    @Test fun conversationCarriesOverWhenProvidersTakeTurns() {
+        // Turn 1 by an OpenAI-style provider whose tool-call IDs Anthropic would reject, then a Claude turn with its own blocks.
+        val chat = listOf(
+            ChatMessage(role = Role.USER, text = "Build my app"),
+            ChatMessage(role = Role.ASSISTANT, text = "Checking files.", source = "NVIDIA · deepseek", toolCalls = listOf(ToolCall("functions.run_command:0", "run_command", """{"command":"ls"}"""))),
+            ChatMessage(role = Role.TOOL, text = "index.html", toolCallId = "functions.run_command:0"),
+            ChatMessage(role = Role.ASSISTANT, text = "Here's the icon.", source = "OpenRouter · img",
+                attachments = listOf(app.switchboard.data.Attachment("icon.png", "/x/icon.png", 2048, "image/png"))),
+            ChatMessage(role = Role.USER, text = "Now add a dark mode"),
+        )
+        val anthropic = Provider(name = "A", kind = ApiKind.ANTHROPIC, baseUrl = base, apiKey = "k", model = "claude")
+        val a = ChatClient().anthropicBody(anthropic, ChatClient().normalize(chat), RequestOptions()).toString()
+        assertTrue(a, a.contains("\"id\":\"functions_run_command_0\"") && a.contains("\"tool_use_id\":\"functions_run_command_0\""))
+        assertTrue(a, a.contains("Build my app") && a.contains("index.html") && a.contains("icon.png") && a.contains("Now add a dark mode"))
+        // And back the other way: everything reaches an OpenAI-style provider too.
+        val openai = Provider(name = "O", kind = ApiKind.OPENAI_COMPATIBLE, baseUrl = base, model = "m")
+        val o = ChatClient().openAiBody(openai, ChatClient().normalize(chat), RequestOptions()).toString()
+        assertTrue(o, o.contains("\"tool_call_id\":\"functions.run_command:0\"") && o.contains("[File shared in this chat: icon.png") && o.contains("Now add a dark mode"))
+    }
 }

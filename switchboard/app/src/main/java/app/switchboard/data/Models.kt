@@ -22,7 +22,11 @@ data class Provider(
     val imageModels: List<String> = emptyList(),
     val audioModels: List<String> = emptyList(),
     val videoModels: List<String> = emptyList(),
-    /** Request limits per model ID (shared by all chats). Models without an entry are unlimited. */
+    /** Overall request limits for this provider (all its models together), shared by all chats. */
+    val limit: ModelLimit = ModelLimit(),
+    /** Takes turns answering with the other providers that have this on. */
+    val inRotation: Boolean = false,
+    /** Older per-model limits; folded into [limit] when settings load. */
     val limits: Map<String, ModelLimit> = emptyMap(),
 ) {
     /** Chat models to try, current first, then the rest of the priority list. */

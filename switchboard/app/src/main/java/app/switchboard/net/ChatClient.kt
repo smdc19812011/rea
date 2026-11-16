@@ -175,14 +175,14 @@ class ChatClient {
             val blocks: List<JsonElement> = when (m.role) {
                 Role.USER -> listOf(textBlock(m.text))
                 Role.TOOL -> listOf(buildJsonObject {
-                    put("type", "tool_result"); put("tool_use_id", m.toolCallId ?: ""); put("content", m.text.ifEmpty { "(no output)" })
+                    put("type", "tool_result"); put("tool_use_id", safeToolId(m.toolCallId ?: "")); put("content", m.text.ifEmpty { "(no output)" })
                     if (m.isError) put("is_error", true)
                 })
                 Role.ASSISTANT -> m.anthropicBlocks?.let { raw -> runCatching { json.parseToJsonElement(raw).jsonArray.toList() }.getOrNull() }
                     ?: buildList {
                         if (m.text.isNotBlank()) add(textBlock(m.text))
                         for (c in m.toolCalls) add(buildJsonObject {
-                            put("type", "tool_use"); put("id", c.id); put("name", c.name); put("input", parseArgs(c.arguments))
+                            put("type", "tool_use"); put("id", safeToolId(c.id)); put("name", c.name); put("input", parseArgs(c.arguments))
                         })
                     }
             }
@@ -424,6 +424,12 @@ fun ChatMessage.withAttachmentNote(): ChatMessage = if (attachments.isEmpty()) t
     text = (text.trim() + "\n\n" + attachments.joinToString("\n") { "[File shared in this chat: ${it.name} (${it.mime}, ${it.size / 1024} KB)]" }).trim(),
     attachments = emptyList(),
 )
+
+/**
+ * Anthropic only accepts tool-call IDs made of letters, digits, _ and -. Calls made earlier by another provider
+ * (e.g. "functions.run_command:0") are mapped consistently so a switched-in Claude model can read the whole history.
+ */
+internal fun safeToolId(id: String): String = id.replace(Regex("[^A-Za-z0-9_-]"), "_").ifEmpty { "call" }
 
 internal fun JsonObject.str(k: String): String? = (this[k] as? JsonPrimitive)?.contentOrNull
 internal fun JsonObject.int(k: String, default: Int = 0): Int = (this[k] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: default

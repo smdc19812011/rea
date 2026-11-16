@@ -123,11 +123,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     val currentAgent: Agent? get() = settings.agents.firstOrNull { it.id == current.agentId }
 
-    /** Provider for this chat: the chat's agent can pick its own provider and model. */
-    fun providerFor(agent: Agent?): Provider? {
-        val base = agent?.providerId?.let { id -> settings.providers.firstOrNull { it.id == id } } ?: activeProvider ?: return null
-        return if (!agent?.model.isNullOrBlank()) base.copy(model = agent!!.model) else base
+    /** Providers taking turns (the ones switched on in the model menu), or just the active one. */
+    val rotation: List<Provider>
+        get() = settings.providers.filter { it.inRotation }.ifEmpty { listOfNotNull(activeProvider) }
+
+    /** Counts replies, so each new message goes to the next provider in [rotation]. */
+    private var turn = 0
+
+    /**
+     * Providers to try for the next reply, in order: the one whose turn it is first, then the others (fallbacks).
+     * An agent with its own provider always uses that one.
+     */
+    fun nextProviders(agent: Agent?): List<Provider> {
+        agent?.providerId?.let { id -> settings.providers.firstOrNull { it.id == id } }?.let { base ->
+            return listOf(if (agent.model.isNotBlank()) base.copy(model = agent.model) else base)
+        }
+        val r = rotation
+        if (r.isEmpty()) return emptyList()
+        val start = turn % r.size
+        val ordered = r.drop(start) + r.take(start)
+        return if (!agent?.model.isNullOrBlank()) listOf(ordered.first().copy(model = agent!!.model)) + ordered.drop(1) else ordered
     }
+
+    /** The provider that answers next (shown in the title and the request counter). */
+    fun providerFor(agent: Agent?): Provider? = nextProviders(agent).firstOrNull()
 
     init {
         viewModelScope.launch {
@@ -183,7 +202,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * go straight to the image model, so they work even when the chat model ignores tools.
      */
     fun send(text: String, asImage: Boolean = false) {
-        val provider = providerFor(currentAgent) ?: return
+        val providers = nextProviders(currentAgent).ifEmpty { return }
         val trimmed = text.trim()
         if (trimmed.isEmpty() || streaming) return
         val title = if (current.messages.isEmpty()) trimmed.lineSequence().first().removePrefix("/image").trim().take(48) else current.title
@@ -194,7 +213,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             asImage -> respondWithMedia(trimmed, video = false)
             settings.fileTools && settings.autoImage && looksLikeVideoRequest(trimmed) && mediaProvider()?.videoModels?.isNotEmpty() == true -> respondWithMedia(trimmed, video = true)
             settings.fileTools && settings.autoImage && looksLikeImageRequest(trimmed) -> respondWithMedia(trimmed, video = false)
-            else -> respond(provider)
+            else -> { turn++; respond(providers) }
         }
     }
 
@@ -224,7 +243,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Re-run the last reply, optionally on whichever provider/model is active now. */
     fun regenerate() {
-        val provider = providerFor(currentAgent) ?: return
+        val providers = nextProviders(currentAgent).ifEmpty { return }
+        turn++
         if (streaming) return
         val msgs = current.messages
         val last = msgs.lastOrNull() ?: return
@@ -232,14 +252,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         // A failed step (e.g. dropped connection) is retried on its own, keeping the tool work done so far.
         if (last.isError) {
             current = current.copy(messages = msgs.dropLast(1))
-            respond(provider)
+            respond(providers)
             return
         }
         // Re-run the whole last answer, including any tool steps, from the last user message.
         val lastUser = msgs.indexOfLast { it.role == Role.USER }
         if (lastUser < 0) return
         current = current.copy(messages = msgs.take(lastUser + 1))
-        respond(provider)
+        respond(providers)
     }
 
     /**
@@ -263,17 +283,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun respond(provider: Provider) {
+    private fun respond(providers: List<Provider>) {
+        val provider = providers.first()
         streaming = true
         WorkService.start(getApplication(), "Replying with ${provider.model}")
         job = viewModelScope.launch {
             try {
                 val opts = buildOptions()
                 var steps = 0
-                var p = provider
+                var order = providers
                 while (true) {
-                    val turn = streamTurn(p, opts) ?: break
-                    p = turn.provider // stay on the model that answered for the rest of this reply
+                    val turn = streamTurn(order, opts) ?: break
+                    // Stay on the provider/model that answered for the rest of this reply; the others remain fallbacks.
+                    order = listOf(turn.provider) + order.filter { it.id != turn.provider.id }
                     val calls = turn.calls
                     if (calls.isEmpty()) break
                     if (++steps > MAX_TOOL_STEPS) {
@@ -303,31 +325,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     /** Streams one model turn into a new assistant message. Returns its tool calls, or null if it failed/was stopped. */
     val zone: ZoneId get() = runCatching { if (settings.timeZone.isBlank()) null else ZoneId.of(settings.timeZone) }.getOrNull() ?: ZoneId.systemDefault()
 
-    private fun limitOf(p: Provider, model: String) = p.limits[model] ?: app.switchboard.data.ModelLimit()
-    private fun limitsFor(p: Provider, model: String) = limitOf(p, model).let { RateLimiter.Limits(it.perMinute, it.perDay, settings.dailyReset, zone) }
+    private fun limitOf(p: Provider) = (settings.providers.firstOrNull { it.id == p.id } ?: p).limit
+    private fun limitsFor(p: Provider) = limitOf(p).let { RateLimiter.Limits(it.perMinute, it.perDay, settings.dailyReset, zone) }
 
     /** Requests used by [model] on [p] (shared by all chats), with its limits. */
-    fun usageFor(p: Provider, model: String = p.model): Pair<app.switchboard.data.ModelLimit, RateLimiter.Usage> =
-        limitOf(p, model) to limiter.usage(RateLimiter.key(p.id, model), limitsFor(p, model))
+    /** Requests used by provider [p] (all its models, all chats), with its limits. */
+    fun usageFor(p: Provider): Pair<app.switchboard.data.ModelLimit, RateLimiter.Usage> = limitOf(p) to limiter.usage(p.id, limitsFor(p))
 
     /**
      * Counts one request for [model]. If it has reached its limit: returns false at once when [canSkip] (the caller moves on
      * to the next model), otherwise waits until the window opens. Re-checks every second, so edited limits apply right away.
      */
-    private suspend fun awaitRateLimit(p: Provider, model: String = p.model, canSkip: Boolean = false): Boolean {
-        val key = RateLimiter.key(p.id, model)
+    private suspend fun awaitRateLimit(p: Provider, canSkip: Boolean = false): Boolean {
         try {
             while (true) {
-                val current = settings.providers.firstOrNull { it.id == p.id } ?: p
-                val l = limitOf(current, model)
-                val w = limiter.tryAcquire(key, limitsFor(current, model)) ?: return true
+                val l = limitOf(p)
+                val w = limiter.tryAcquire(p.id, limitsFor(p)) ?: return true
                 if (canSkip) return false
                 val left = w.untilMs - System.currentTimeMillis()
                 toolStatus = when (w.scope) {
-                    RateLimiter.Scope.MINUTE -> "$model: limit of ${l.perMinute} requests per minute reached. Sending in ${(left + 999) / 1000} s…"
+                    RateLimiter.Scope.MINUTE -> "${p.name}: limit of ${l.perMinute} requests per minute reached. Sending in ${(left + 999) / 1000} s…"
                     RateLimiter.Scope.DAY -> {
                         val at = ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(w.untilMs), zone)
-                        "$model: daily limit of ${l.perDay} requests reached. Sending at ${at.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))} (${zone.id}). Keep the app open."
+                        "${p.name}: daily limit of ${l.perDay} requests reached. Sending at ${at.format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))} (${zone.id}). Keep the app open."
                     }
                 }
                 delay(left.coerceIn(200, 1000))
@@ -342,26 +362,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
      * overloaded), the next chat model in the provider's priority list takes over with the same full history.
      * If the conversation is too long for a model, the oldest messages are left out.
      */
-    private suspend fun streamTurn(provider: Provider, opts: RequestOptions): TurnResult? {
-        val models = provider.chatOrder.ifEmpty { listOf(provider.model) }
-        for ((index, model) in models.withIndex()) {
-            val p = provider.copy(model = model)
-            val canSwitch = index < models.lastIndex
+    private suspend fun streamTurn(providers: List<Provider>, opts: RequestOptions): TurnResult? {
+        // Every provider's chat models in priority order, the provider whose turn it is first.
+        val candidates = providers.flatMap { pr -> pr.chatOrder.ifEmpty { listOf(pr.model) }.map { m -> pr.copy(model = m) } }
+        val limited = mutableSetOf<String>()
+        for ((index, p) in candidates.withIndex()) {
+            val canSwitch = index < candidates.lastIndex
+            val next = candidates.getOrNull(index + 1)?.let { "${it.name} · ${it.model}" }
+            if (p.id in limited && canSwitch) continue // this provider is at its limit; try the next one
             val backoff = if (canSwitch) listOf(3) else listOf(3, 10, 30) // seconds; move on quickly when another model is waiting
             var attempt = 0
             var keep: Int? = null
             while (true) {
-                if (!awaitRateLimit(p, model, canSkip = canSwitch)) {
-                    toolStatus = "$model reached its request limit. Using ${models[index + 1]}…"
+                if (!awaitRateLimit(p, canSkip = canSwitch)) {
+                    limited += p.id
+                    toolStatus = "${p.name} reached its request limit. Using $next…"
                     delay(800); toolStatus = null
                     break
                 }
                 when (val r = attemptTurn(p, opts, finalAttempt = attempt >= backoff.size, keepLast = keep, canSwitch = canSwitch)) {
                     is TurnOutcome.Done -> return TurnResult(r.calls, p)
                     is TurnOutcome.Failed -> return null
-                    is TurnOutcome.TrimContext -> { keep = r.keep; toolStatus = "This chat is too long for $model; sending the most recent part…" }
+                    is TurnOutcome.TrimContext -> { keep = r.keep; toolStatus = "This chat is too long for ${p.model}; sending the most recent part…" }
                     is TurnOutcome.SwitchModel -> {
-                        toolStatus = "$model couldn't answer (${r.reason.take(80)}). Trying ${models[index + 1]}…"
+                        toolStatus = "${p.name} · ${p.model} couldn't answer (${r.reason.take(80)}). Trying $next…"
                         delay(1200); toolStatus = null
                         break
                     }
@@ -631,6 +655,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val base = requestOptions()
         val project = settings.projects.firstOrNull { it.id == current.projectId }
         val sys = mutableListOf(base.system, agent?.systemPrompt.orEmpty(), Extras.projectNote(project))
+        val voices = current.messages.mapNotNull { it.source?.substringAfter(" · ") }.toSet()
+        if (rotation.size > 1 || voices.size > 1)
+            sys += "Several AI models take turns answering in this chat. Earlier assistant messages and tool results may come from other models: " +
+                "treat them as your own previous replies, keep everything already established (facts, decisions, files, code, plans), and continue seamlessly."
         val tools = mutableListOf<ToolSpec>()
         val toolsAllowed = agent?.useTools != false
         if (toolsAllowed && settings.toolsEnabled) {
@@ -817,7 +845,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Images, audio and video come from the chat's own provider when it speaks the OpenAI-style API (OpenRouter, OpenAI, ...). */
-    private fun mediaProvider(): Provider? = providerFor(currentAgent)?.takeIf { it.kind == ApiKind.OPENAI_COMPATIBLE }
+    private fun mediaProvider(): Provider? = (nextProviders(currentAgent) + rotation).firstOrNull { it.kind == ApiKind.OPENAI_COMPATIBLE }
 
     /** Tries [models] in order; returns the first success, or throws with every model's reason. */
     private suspend fun <T> firstThatWorks(p: Provider, models: List<String>, what: String, attempt: suspend (String) -> T): Pair<T, String> {
@@ -825,7 +853,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val errors = mutableListOf<String>()
         val list = models.take(8)
         for ((i, m) in list.withIndex()) {
-            if (!awaitRateLimit(p, m, canSkip = i < list.lastIndex)) { errors += "• $m: request limit reached"; continue }
+            if (!awaitRateLimit(p, canSkip = i < list.lastIndex)) { errors += "• $m: ${p.name} is at its request limit"; continue }
             toolStatus = "Making $what with $m…"
             try { return attempt(m) to m } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { errors += "• $m: ${e.message?.take(200)}" }
         }
@@ -1128,6 +1156,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     // --- settings ---
 
     fun selectProvider(id: String) = updateSettings { it.copy(activeProviderId = id) }
+
+    /** Turns a provider's place in the rotation on/off (at least one stays on). */
+    fun toggleRotation(id: String) = updateSettings { s ->
+        val on = s.providers.filter { it.inRotation }.map { it.id }.ifEmpty { listOfNotNull(s.activeProviderId ?: s.providers.firstOrNull()?.id) }.toMutableSet()
+        if (id in on) { if (on.size > 1) on -= id } else on += id
+        s.copy(providers = s.providers.map { it.copy(inRotation = it.id in on) }, activeProviderId = s.providers.firstOrNull { it.id in on }?.id)
+    }
+
+    /** Picks which of a provider's ranked chat models is used now. */
+    fun setModelFor(providerId: String, model: String) {
+        val p = settings.providers.firstOrNull { it.id == providerId } ?: return
+        upsertProvider(p.copy(model = model))
+    }
 
     fun setModel(model: String) {
         val p = activeProvider ?: return

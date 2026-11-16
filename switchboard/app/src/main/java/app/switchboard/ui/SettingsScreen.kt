@@ -109,11 +109,11 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit, onOpen: (String) -> Un
             }
             HorizontalDivider()
             Text("Model providers", style = MaterialTheme.typography.titleMedium)
-            Text("The selected provider answers new messages. You can switch mid-conversation; the full history is sent to whichever model is active.",
+            Text("Tick two or more providers to have them take turns answering (load balancing). Whoever answers gets the whole conversation, so nothing is lost when the model changes.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             s.providers.forEach { p ->
                 ListItem(
-                    leadingContent = { RadioButton(selected = p.id == vm.activeProvider?.id, onClick = { vm.selectProvider(p.id) }) },
+                    leadingContent = { androidx.compose.material3.Checkbox(checked = vm.rotation.any { it.id == p.id }, onCheckedChange = { vm.toggleRotation(p.id) }) },
                     headlineContent = { Text(p.name) },
                     supportingContent = { Text("${p.model.ifBlank { "no model" }} · ${p.baseUrl}", maxLines = 2) },
                     trailingContent = {
@@ -200,8 +200,8 @@ private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean,
     var lists by remember { mutableStateOf(mapOf(
         Task.CHAT to initial.chatOrder, Task.IMAGE to initial.imageModels, Task.AUDIO to initial.audioModels, Task.VIDEO to initial.videoModels)) }
     var task by remember { mutableStateOf(Task.CHAT) }
-    var limits by remember { mutableStateOf(initial.limits) }
-    var limitFor by remember { mutableStateOf<String?>(null) }
+    var perMin by remember { mutableStateOf(if (initial.limit.perMinute > 0) initial.limit.perMinute.toString() else "") }
+    var perDay by remember { mutableStateOf(if (initial.limit.perDay > 0) initial.limit.perDay.toString() else "") }
     var models by remember { mutableStateOf<List<app.switchboard.net.ModelInfo>?>(null) }
     var detectNote by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
@@ -249,6 +249,17 @@ private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean,
                         Icon(if (showKey) Icons.Default.VisibilityOff else Icons.Default.Visibility, if (showKey) "Hide key" else "Show key") } })
 
                 HorizontalDivider()
+                Text("Request limits", style = MaterialTheme.typography.titleSmall)
+                Text("For this whole provider (all its models together), shared by all chats. Leave blank for no limit. At the limit, the next provider taking turns answers instead.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(perMin, { perMin = it.filter(Char::isDigit).take(6) }, label = { Text("Per minute") }, singleLine = true,
+                        placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                    OutlinedTextField(perDay, { perDay = it.filter(Char::isDigit).take(7) }, label = { Text("Per day") }, singleLine = true,
+                        placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                }
+
+                HorizontalDivider()
                 Text("Models by priority", style = MaterialTheme.typography.titleSmall)
                 Text("For each task, pick models in the order to try them. When #1 can't do it (unavailable, out of credits, can't make that kind of output), #2 is tried, and so on.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -281,10 +292,6 @@ private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean,
                         IconButton(enabled = i < chosen.lastIndex, onClick = { setChosen(chosen.toMutableList().apply { add(i + 1, removeAt(i)) }) }) {
                             Icon(Icons.Default.KeyboardArrowDown, "Move $id down") }
                         IconButton(onClick = { setChosen(chosen - id) }) { Icon(Icons.Default.Close, "Remove $id") }
-                    }
-                    val lim = limits[id]
-                    TextButton(onClick = { limitFor = id }, modifier = Modifier.padding(start = 20.dp)) {
-                        Text("⏱ " + (lim?.takeIf { it.isSet }?.label() ?: "No request limit"), style = MaterialTheme.typography.labelMedium)
                     }
                 }
 
@@ -321,37 +328,13 @@ private fun ProviderDialog(vm: ChatViewModel, initial: Provider, isNew: Boolean,
         confirmButton = {
             TextButton(enabled = valid, onClick = {
                 val chat = lists[Task.CHAT].orEmpty()
-                val used = lists.values.flatten().toSet()
-                onSave(draft().copy(model = chat.firstOrNull() ?: initial.model, chatModels = chat, limits = limits.filter { (k, v) -> k in used && v.isSet },
+                onSave(draft().copy(model = chat.firstOrNull() ?: initial.model, chatModels = chat, limits = emptyMap(),
+                    limit = app.switchboard.data.ModelLimit(perMin.toIntOrNull() ?: 0, perDay.toIntOrNull() ?: 0),
                     imageModels = lists[Task.IMAGE].orEmpty(), audioModels = lists[Task.AUDIO].orEmpty(), videoModels = lists[Task.VIDEO].orEmpty()))
             }) { Text("Save") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
-    limitFor?.let { id -> ModelLimitDialog(id, limits[id] ?: app.switchboard.data.ModelLimit(), onDismiss = { limitFor = null }) { limits = limits + (id to it); limitFor = null } }
-}
-
-/** Per-minute and per-day request limits for one model (blank = no limit). */
-@Composable
-private fun ModelLimitDialog(model: String, initial: app.switchboard.data.ModelLimit, onDismiss: () -> Unit, onSave: (app.switchboard.data.ModelLimit) -> Unit) {
-    var perMin by remember { mutableStateOf(if (initial.perMinute > 0) initial.perMinute.toString() else "") }
-    var perDay by remember { mutableStateOf(if (initial.perDay > 0) initial.perDay.toString() else "") }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("Request limits") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(model, style = MaterialTheme.typography.bodySmall)
-                Text("Shared by all chats and background tasks. Leave blank for no limit.", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                FRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(perMin, { perMin = it.filter(Char::isDigit).take(6) }, label = { Text("Per minute") }, singleLine = true,
-                        placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                    OutlinedTextField(perDay, { perDay = it.filter(Char::isDigit).take(7) }, label = { Text("Per day") }, singleLine = true,
-                        placeholder = { Text("No limit") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = { onSave(app.switchboard.data.ModelLimit(perMin.toIntOrNull() ?: 0, perDay.toIntOrNull() ?: 0)) }) { Text("OK") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -462,8 +445,8 @@ private fun SetupStep(n: Int, text: String, done: Boolean) {
 private fun LimitsSection(vm: ChatViewModel) {
     val s = vm.settings
     Text("Request limits", style = MaterialTheme.typography.titleMedium)
-    Text("Each model has its own per-minute and per-day limits: tap ⏱ next to a model when editing a provider. Limits are shared by all chats and background tasks. " +
-        "When a model hits its limit, the next model in its priority list is used; if there's none, the request waits and sends automatically.",
+    Text("Each provider has its own per-minute and per-day limits (edit the provider), shared by all chats and background tasks. " +
+        "When a provider hits its limit, the next provider taking turns answers; if there's none, the request waits and sends automatically.",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Text("Daily limits reset", style = MaterialTheme.typography.labelMedium)
     val resets = listOf(DailyReset.MIDNIGHT to "At midnight", DailyReset.ROLLING to "Rolling 24 hours")

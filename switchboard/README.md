@@ -106,11 +106,10 @@ Everything below is in **Settings**, at the top of the page.
 - **Rename chats**: tap the pencil next to a chat in the side menu. You can move it into or out of a project there too.
 - **Scheduled tasks**: once, every N hours, daily or weekly, in your time zone, with an optional project and agent. Runs use Android's background job scheduler, so they work with the app closed. Each run is saved as a chat and you get a notification. Tools and connectors run without asking only if you turn on "Allow tools and connectors" for that task. With Tools on, the model can schedule tasks too (`schedule_task`).
 
-## Request limits and time zone
-- **Per-model limits**: edit a provider and tap ⏱ under a chosen model to set its requests per minute and per day (blank means no limit). Counts are shared by all chats and background tasks, and survive restarts.
-- When a model hits its limit and another model is next in that task's priority list, the request moves on straight away; otherwise it waits and sends automatically (with a countdown above the message box).
-- The counter under the message box shows the remaining requests for the model in use, and the model menu shows them for each model.
-- Settings keeps how daily limits reset (**at midnight** in your time zone, or **rolling 24 hours**) and the **time zone**, which is also used to tell the model your local date and time.
+## Providers taking turns, and request limits
+- **Load balancing**: tick two or more providers (Settings provider list, or the model menu). Each new message goes to the next one in turn. If it can't answer (unavailable, out of credits, rate-limited, at its limit), its next chat model and then the other providers take over.
+- **Memory across models**: every reply gets the full saved conversation, including tool steps and notes about files in the chat. Tool-call IDs from one provider are made valid for the others, and each model is told that earlier replies may come from other models so it continues as one assistant.
+- **Limits per provider**: edit a provider to set its overall requests per minute and per day (all its models together, shared by all chats and background tasks). The counter under the message box shows the provider answering next. Settings keeps how daily limits reset and the time zone.
 
 ## Unrestricted mode
 This switch in Settings asks you to confirm before it turns on. It lifts the app's own limits:
