@@ -186,16 +186,34 @@ object Toolbox {
     private const val SDK_FETCH = "mkdir -p \$d/cmdline-tools; cd \$d; " +
         "if [ ! -x cmdline-tools/latest/bin/sdkmanager ]; then curl -fLo clt.zip $SDK_URL; unzip -qo clt.zip -d cmdline-tools; rm -rf cmdline-tools/latest; mv cmdline-tools/cmdline-tools cmdline-tools/latest; rm -f clt.zip; fi; "
 
+    /** sdkmanager needs Java 17+; say so plainly instead of failing later with a Java stack trace. */
+    private const val JAVA_CHECK = "java -version 2>&1 | grep -Eq 'version \"(1[7-9]|[2-9][0-9])' || { echo \"Error: the Android SDK tools need Java 17 or newer (found: \$(java -version 2>&1 | head -1)). Install Java (OpenJDK 17) first.\"; exit 1; }; "
+
+    /**
+     * Accepts the SDK licenses in their own step (yes's harmless "Broken pipe" is silenced there), then installs [packages]
+     * with sdkmanager's output kept in a log, whose tail is shown if it fails.
+     */
+    private fun sdkInstall(packages: String) =
+        "(yes 2>/dev/null | cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d --licenses >/dev/null 2>&1) || true; " +
+            "cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d $packages > \$d/sdkmanager.log 2>&1 || { tail -n 25 \$d/sdkmanager.log; " +
+            "echo \"Error: sdkmanager couldn't install the SDK packages (full log: \$d/sdkmanager.log)\"; exit 1; }; "
+
+    /** The most useful line of an install log for the status line: the last real error, not trailing noise. */
+    fun summary(log: String): String {
+        val lines = log.lines().map { it.trim() }.filter { it.isNotBlank() && !it.startsWith("LOCATION=") && !it.contains("Broken pipe") && !it.startsWith("[=") }
+        return (lines.lastOrNull { Regex("(?i)error|failed|not found|denied|unable|cannot|can't|could not|no such|exit code [1-9]").containsMatchIn(it) } ?: lines.lastOrNull()).orEmpty()
+    }
+
     /** Every built-in tool, for all machines (names are stable, so "already added" is found by name). */
     val catalog: List<ToolPackage> by lazy { listOf(
         // ---- developer set ----
         preset("Android SDK", "Android developer SDK: sdkmanager, platform 35 (android.jar), build tools (aapt2, d8, apksigner, zipalign); sets ANDROID_HOME",
             // Termux (ARM): Google's build-tools binaries are x86-only, so the build tools come from Termux packages; sdkmanager (Java) fetches the platform.
             "set -e; pkg install -y openjdk-17 aapt aapt2 d8 apksigner zip unzip curl; d=\$HOME/switchboard-tools/android-sdk; " + SDK_FETCH +
-                "yes | cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d 'platforms;android-35' >/dev/null; " + ANDROID_HOME_LINE +
+                JAVA_CHECK + sdkInstall("'platforms;android-35'") + ANDROID_HOME_LINE +
                 "echo 'For Gradle builds add android.aapt2FromMavenOverride='\$(command -v aapt2)' to gradle.properties'; echo \"LOCATION=\$d\"",
             "set -e; command -v java >/dev/null || { echo 'Java is needed first (add Java (OpenJDK 17))'; exit 1; }; d=\$HOME/switchboard-tools/android-sdk; " + SDK_FETCH +
-                "yes | cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' >/dev/null; " + ANDROID_HOME_LINE + "echo \"LOCATION=\$d\"",
+                JAVA_CHECK + sdkInstall("'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'") + ANDROID_HOME_LINE + "echo \"LOCATION=\$d\"",
             "d=\$HOME/switchboard-tools/android-sdk; [ -d \$d/platforms/android-35 ] && command -v aapt2 >/dev/null && echo \"LOCATION=\$d\"",
             "d=\$HOME/switchboard-tools/android-sdk; [ -d \$d/platforms/android-35 ] && echo \"LOCATION=\$d\""),
         pkg("ADB & fastboot", "Android platform tools: adb (incl. adb pair for Android 11+ wireless debugging) and fastboot", "android-tools", "adb fastboot", "adb"),

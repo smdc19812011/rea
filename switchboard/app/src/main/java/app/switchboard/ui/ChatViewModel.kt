@@ -764,7 +764,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         toolStatus = "Installing $name…"
         val st = try { installNow(pkg.id) } finally { toolStatus = prev }
         return if (st.ok) ToolResult("Installed $name${if (st.location.isNotBlank()) " at ${st.location}" else ""}. It's in the Toolbox now, so future chats, agents and tasks will use it without installing again.")
-        else ToolResult("Installing $name failed:\n${st.log.takeLast(2000)}", true)
+        else ToolResult("Installing $name failed: ${Toolbox.summary(st.log)}\n\nLog tail:\n${st.log.takeLast(2000)}", true)
     }
 
     fun installAll() = settings.packages.filter { it.installs[settings.runnerMode.name]?.ok != true }.forEach { installPackage(it.id) }

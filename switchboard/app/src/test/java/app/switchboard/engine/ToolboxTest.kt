@@ -104,4 +104,31 @@ class ToolboxTest {
         assertTrue(note, note.contains("- rea (GitHub) at /data/home/switchboard-tools/rea-github") && note.contains("not installed on this machine yet: FFmpeg"))
         assertEquals("", Toolbox.note(emptyList(), RunnerMode.TERMUX))
     }
+
+    @Test fun statusLineShowsTheRealErrorNotBrokenPipe() {
+        val log = "Exit code 1.\nLoading package information...\nError: Failed to find package 'platforms;android-35'\n[=======   ] 70%\nyes: standard output: Broken pipe\n"
+        assertEquals("Error: Failed to find package 'platforms;android-35'", Toolbox.summary(log))
+        assertEquals("Done", Toolbox.summary("Exit code 0.\nDone\nLOCATION=/x\n"))
+    }
+
+    @Test fun androidSdkScriptSurfacesSdkmanagerFailuresAndJavaVersion() {
+        val home = Files.createTempDirectory("home").toFile()
+        val sdk = Toolbox.catalog.first { it.name == "Android SDK" }
+        // Fake sdkmanager that accepts licenses but fails to install, plus a fake old java.
+        val bin = File(home, "bin").apply { mkdirs() }
+        val d = File(home, "switchboard-tools/android-sdk/cmdline-tools/latest/bin").apply { mkdirs() }
+        File(d, "sdkmanager").apply { writeText("#!/bin/sh\ncase \"$*\" in *--licenses*) head -c 20 >/dev/null; exit 0;; esac\necho \"Error: Failed to find package 'platforms;android-35'\"; exit 1\n"); setExecutable(true) }
+        File(bin, "java").apply { writeText("#!/bin/sh\necho 'openjdk version \"21.0.1\" 2023-10-17' >&2\n"); setExecutable(true) }
+        val script = Toolbox.installScript(sdk, RunnerMode.REMOTE)!!
+        val p = ProcessBuilder("bash", "-c", script).redirectErrorStream(true).apply { environment()["HOME"] = home.path; environment()["PATH"] = "${bin.path}:" + System.getenv("PATH") }.start()
+        val out = p.inputStream.bufferedReader().readText(); val code = p.waitFor()
+        assertTrue(out, code != 0 && !out.contains("Broken pipe"))
+        assertEquals("Error: sdkmanager couldn't install the SDK packages (full log: ${home.path}/switchboard-tools/android-sdk/sdkmanager.log)", Toolbox.summary(out))
+        assertTrue(out, out.contains("Failed to find package 'platforms;android-35'")) // the log tail is shown
+        // Java 11 is reported clearly.
+        File(bin, "java").writeText("#!/bin/sh\necho 'openjdk version \"11.0.2\" 2019-01-15' >&2\n")
+        val p2 = ProcessBuilder("bash", "-c", script).redirectErrorStream(true).apply { environment()["HOME"] = home.path; environment()["PATH"] = "${bin.path}:" + System.getenv("PATH") }.start()
+        val out2 = p2.inputStream.bufferedReader().readText(); p2.waitFor()
+        assertTrue(out2, Toolbox.summary(out2).startsWith("Error: the Android SDK tools need Java 17 or newer"))
+    }
 }

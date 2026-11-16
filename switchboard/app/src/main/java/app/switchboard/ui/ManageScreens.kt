@@ -476,7 +476,7 @@ private fun ToolboxPage(vm: ChatViewModel) {
                         busy != null -> Text(busy, color = MaterialTheme.colorScheme.primary)
                         st == null -> Text("Not installed on $machine")
                         st.ok -> Text("✓ Installed${if (st.location.isNotBlank()) " at ${st.location}" else ""}", color = MaterialTheme.colorScheme.primary)
-                        else -> Text("✗ ${st.log.lineSequence().lastOrNull { it.isNotBlank() }?.take(120) ?: "Failed"}", color = MaterialTheme.colorScheme.error)
+                        else -> Text("✗ ${app.switchboard.engine.Toolbox.summary(st.log).take(160).ifBlank { "Failed" }}", color = MaterialTheme.colorScheme.error)
                     }
                 }
             },
