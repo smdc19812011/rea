@@ -24,7 +24,7 @@ class Store(context: Context) {
             runnerToken = SecretBox.decrypt(raw.runnerToken),
             termuxToken = SecretBox.decrypt(raw.termuxToken),
             connectors = raw.connectors.map { it.copy(auth = it.auth.mapSecrets(SecretBox::decrypt)) },
-            packages = raw.packages.map { it.copy(token = SecretBox.decrypt(it.token)) },
+            packages = raw.packages.map { app.switchboard.engine.Toolbox.refreshPreset(it.copy(token = SecretBox.decrypt(it.token))) },
         ) }
     }
 

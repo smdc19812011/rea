@@ -92,6 +92,9 @@ class ToolboxTest {
         Toolbox.developerSet.forEach { assertTrue(it, it in termux && it in remote) }
         assertTrue(termux.toString(), "Android build tools only" in termux && "Termux:API USB access" in termux && "rea (GitHub)" in termux)
         assertTrue("Android build tools only" !in remote && "Termux:API USB access" !in remote)
+        assertTrue("USB utilities" in remote && "USB utilities" !in termux) // Termux has no usbutils package
+        val py = Toolbox.installScript(Toolbox.catalog.first { it.name == "Python 3 + pip" }, RunnerMode.TERMUX)!!
+        assertTrue(py, py.contains("|| { apt update -y") ) // stale package lists are refreshed once
         assertEquals(Toolbox.catalog.size, Toolbox.catalog.map { it.name }.toSet().size) // names are unique
         // Android SDK on Termux uses ARM build tools from packages and fetches android.jar with sdkmanager.
         val sdk = Toolbox.catalog.first { it.name == "Android SDK" }
@@ -117,7 +120,7 @@ class ToolboxTest {
         // Fake sdkmanager that accepts licenses but fails to install, plus a fake old java.
         val bin = File(home, "bin").apply { mkdirs() }
         val d = File(home, "switchboard-tools/android-sdk/cmdline-tools/latest/bin").apply { mkdirs() }
-        File(d, "sdkmanager").apply { writeText("#!/bin/sh\ncase \"$*\" in *--licenses*) head -c 20 >/dev/null; exit 0;; esac\necho \"Error: Failed to find package 'platforms;android-35'\"; exit 1\n"); setExecutable(true) }
+        File(d, "sdkmanager").apply { writeText("#!/nonexistent/env sh\ncase \"$*\" in *--licenses*) head -c 20 >/dev/null; exit 0;; esac\necho \"Error: Failed to find package 'platforms;android-35'\"; exit 1\n"); setExecutable(true) }
         File(bin, "java").apply { writeText("#!/bin/sh\necho 'openjdk version \"21.0.1\" 2023-10-17' >&2\n"); setExecutable(true) }
         val script = Toolbox.installScript(sdk, RunnerMode.REMOTE)!!
         val p = ProcessBuilder("bash", "-c", script).redirectErrorStream(true).apply { environment()["HOME"] = home.path; environment()["PATH"] = "${bin.path}:" + System.getenv("PATH") }.start()
@@ -130,5 +133,17 @@ class ToolboxTest {
         val p2 = ProcessBuilder("bash", "-c", script).redirectErrorStream(true).apply { environment()["HOME"] = home.path; environment()["PATH"] = "${bin.path}:" + System.getenv("PATH") }.start()
         val out2 = p2.inputStream.bufferedReader().readText(); p2.waitFor()
         assertTrue(out2, Toolbox.summary(out2).startsWith("Error: the Android SDK tools need Java 17 or newer"))
+    }
+
+    @Test fun existingPresetEntriesPickUpFixedCommands() {
+        val current = Toolbox.catalog.first { it.name == "Android SDK" }
+        val old = current.copy(id = "mine", scripts = mapOf("TERMUX" to "yes | cmdline-tools/latest/bin/sdkmanager old"),
+            installs = mapOf("TERMUX" to app.switchboard.data.InstallState(1, false, "", "bad interpreter")))
+        val refreshed = Toolbox.refreshPreset(old)
+        assertEquals("mine", refreshed.id)                                   // same entry, history kept
+        assertEquals(old.installs, refreshed.installs)
+        assertTrue(refreshed.scripts["TERMUX"]!!.contains("sh cmdline-tools/latest/bin/sdkmanager"))
+        val custom = ToolPackage(name = "Android SDK", source = "my own script", kind = PackageKind.SCRIPT) // hand-made entry: untouched
+        assertEquals(custom, Toolbox.refreshPreset(custom))
     }
 }

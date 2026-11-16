@@ -174,10 +174,14 @@ object Toolbox {
             checks = listOfNotNull(termuxCheck?.let { RunnerMode.TERMUX.name to it }, remoteCheck?.let { RunnerMode.REMOTE.name to it }).toMap(),
         )
 
-    private fun pkg(name: String, desc: String, termuxPkg: String, aptPkg: String, bin: String) = preset(name, desc,
-        "pkg install -y $termuxPkg",
-        "if command -v apt-get >/dev/null; then sudo -n apt-get install -y $aptPkg; elif command -v brew >/dev/null; then brew install ${aptPkg.split(' ').first()}; elif command -v dnf >/dev/null; then sudo -n dnf install -y $aptPkg; else echo 'No supported package manager found'; exit 1; fi",
-        "command -v $bin >/dev/null && echo \"LOCATION=\$(command -v $bin)\"", "command -v $bin >/dev/null && echo \"LOCATION=\$(command -v $bin)\"")
+    /**
+     * A system package. "Unable to locate package" often just means a stale package list, so each install retries once after
+     * refreshing it. [termuxPkg] null = not available in Termux.
+     */
+    private fun pkg(name: String, desc: String, termuxPkg: String?, aptPkg: String, bin: String) = preset(name, desc,
+        termuxPkg?.let { "pkg install -y $it || { apt update -y >/dev/null 2>&1; pkg install -y $it; }" },
+        "if command -v apt-get >/dev/null; then sudo -n apt-get install -y $aptPkg || { sudo -n apt-get update -qq && sudo -n apt-get install -y $aptPkg; }; elif command -v brew >/dev/null; then brew install ${aptPkg.split(' ').first()}; elif command -v dnf >/dev/null; then sudo -n dnf install -y $aptPkg; else echo 'No supported package manager found'; exit 1; fi",
+        termuxPkg?.let { "command -v $bin >/dev/null && echo \"LOCATION=\$(command -v $bin)\"" }, "command -v $bin >/dev/null && echo \"LOCATION=\$(command -v $bin)\"")
 
     private const val SDK_URL = "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
 
@@ -190,12 +194,13 @@ object Toolbox {
     private const val JAVA_CHECK = "java -version 2>&1 | grep -Eq 'version \"(1[7-9]|[2-9][0-9])' || { echo \"Error: the Android SDK tools need Java 17 or newer (found: \$(java -version 2>&1 | head -1)). Install Java (OpenJDK 17) first.\"; exit 1; }; "
 
     /**
+     * sdkmanager is started with `sh` because its first line asks for /usr/bin/env, which doesn't exist on Android/Termux.
      * Accepts the SDK licenses in their own step (yes's harmless "Broken pipe" is silenced there), then installs [packages]
      * with sdkmanager's output kept in a log, whose tail is shown if it fails.
      */
     private fun sdkInstall(packages: String) =
-        "(yes 2>/dev/null | cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d --licenses >/dev/null 2>&1) || true; " +
-            "cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d $packages > \$d/sdkmanager.log 2>&1 || { tail -n 25 \$d/sdkmanager.log; " +
+        "(yes 2>/dev/null | sh cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d --licenses >/dev/null 2>&1) || true; " +
+            "sh cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d $packages > \$d/sdkmanager.log 2>&1 || { tail -n 25 \$d/sdkmanager.log; " +
             "echo \"Error: sdkmanager couldn't install the SDK packages (full log: \$d/sdkmanager.log)\"; exit 1; }; "
 
     /** The most useful line of an install log for the status line: the last real error, not trailing noise. */
@@ -243,7 +248,8 @@ object Toolbox {
         // ---- hardware and networks ----
         pkg("Network tools", "nmap, netcat, dig, traceroute for finding and testing devices on your network",
             "nmap netcat-openbsd dnsutils traceroute", "nmap netcat-openbsd dnsutils traceroute", "nmap"),
-        pkg("USB utilities", "lsusb and usb-devices for inspecting USB hardware", "usbutils", "usbutils", "lsusb"),
+        // Not in Termux: Android doesn't let apps read the USB device list; there, use Termux:API USB access or list_devices.
+        pkg("USB utilities", "lsusb and usb-devices for inspecting USB hardware (computers only)", null, "usbutils", "lsusb"),
         preset("Termux:API USB access", "termux-usb and libusb so programs in Termux can open USB devices (also install the Termux:API app from F-Droid)",
             "pkg install -y termux-api libusb && echo \"LOCATION=\$(command -v termux-usb)\"", null,
             "command -v termux-usb >/dev/null && echo \"LOCATION=\$(command -v termux-usb)\"", null),
@@ -257,6 +263,16 @@ object Toolbox {
         // ---- repositories ----
         ToolPackage(name = "rea (GitHub)", description = "smdc19812011/rea repository", kind = PackageKind.GIT, source = "https://github.com/smdc19812011/rea"),
     ) }
+
+    /**
+     * Built-in tools added earlier keep a copy of their install commands; refresh them from the current catalog so fixes
+     * (like starting sdkmanager through sh on Termux) reach existing entries. Tools the user edited by hand are left alone.
+     */
+    fun refreshPreset(p: ToolPackage): ToolPackage {
+        if (p.scripts.isEmpty() && p.checks.isEmpty()) return p
+        val c = catalog.firstOrNull { it.name == p.name } ?: return p
+        return p.copy(source = c.source, description = c.description, kind = c.kind, scripts = c.scripts, checks = c.checks)
+    }
 
     /** The one-tap developer set. */
     val developerSet = listOf("Android SDK", "ADB & fastboot", "Node.js + npm", "Python 3 + pip", "Git", "Java (OpenJDK 17)")
