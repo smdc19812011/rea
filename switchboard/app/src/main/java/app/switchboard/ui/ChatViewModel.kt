@@ -714,6 +714,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 "Make it self-contained (no CDN links unless you request the INTERNET permission), mobile-friendly (viewport meta tag, touch-sized controls), and save data with localStorage. " +
                 "Only apps that truly need native Java/Kotlin code require Termux mode (Settings > Tools > Termux)."
             RunnerMode.TERMUX -> "This is Termux on the user's phone (no root). Install tools with `pkg install -y ...`. " +
+                "pip can't build packages with native code here (no wheels; it would need Rust/compilers), so install those from Termux first: " +
+                "`pkg install -y python-cryptography python-numpy python-pillow python-lxml`, then pip install the rest. " +
                 "To build an APK without Gradle: `pkg install -y openjdk-17 aapt aapt2 d8 apksigner zip`; find android.jar with `find ${'$'}PREFIX -name android.jar`; " +
                 "then aapt2 compile/link, javac against android.jar, d8, zip the dex in, and sign with apksigner using a debug keystore made by keytool. " +
                 "Gradle also works but is slow and needs android.aapt2FromMavenOverride pointing at Termux's aapt2. " +
@@ -808,7 +810,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         else ToolResult("Installing $name failed: ${Toolbox.summary(st.log)}\n\nLog tail:\n${st.log.takeLast(2000)}", true)
     }
 
-    fun installAll() = settings.packages.filter { it.installs[settings.runnerMode.name]?.ok != true }.forEach { installPackage(it.id) }
+    fun installAll() = settings.packages.filter { it.installs[settings.runnerMode.name]?.ok != true && Toolbox.availableOn(it, settings.runnerMode) }.forEach { installPackage(it.id) }
 
     /** Marks tools that are already on the machine as installed, without reinstalling anything. */
     fun checkPackages() {

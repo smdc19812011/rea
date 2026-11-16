@@ -471,9 +471,12 @@ private fun ToolboxPage(vm: ChatViewModel) {
             headlineContent = { Text(p.name) },
             supportingContent = {
                 Column {
-                    Text("${app.switchboard.engine.Toolbox.kindOf(p).name.lowercase()} · ${p.source.lineSequence().first().take(70)}", maxLines = 1)
+                    Text("${app.switchboard.engine.Toolbox.kindOf(p).name.lowercase()} · ${app.switchboard.engine.Toolbox.commandFor(p, mode).lineSequence().first().take(70)}", maxLines = 1)
                     when {
                         busy != null -> Text(busy, color = MaterialTheme.colorScheme.primary)
+                        !app.switchboard.engine.Toolbox.availableOn(p, mode) -> Text("Not available on $machine" +
+                            if (mode == app.switchboard.data.RunnerMode.TERMUX) " (computers only). Delete it, or switch Tools to Computer to use it." else ".",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                         st == null -> Text("Not installed on $machine")
                         st.ok -> Text("✓ Installed${if (st.location.isNotBlank()) " at ${st.location}" else ""}", color = MaterialTheme.colorScheme.primary)
                         else -> Text("✗ ${app.switchboard.engine.Toolbox.summary(st.log).take(160).ifBlank { "Failed" }}", color = MaterialTheme.colorScheme.error)
@@ -483,7 +486,8 @@ private fun ToolboxPage(vm: ChatViewModel) {
             trailingContent = { RowActions({ editing = p }, { deleting = p }, p.name) },
         )
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.padding(start = 16.dp)) {
-            FilledTonalButton(enabled = busy == null, onClick = { vm.installPackage(p.id) }) { Text(if (st?.ok == true) "Update" else "Install") }
+            if (app.switchboard.engine.Toolbox.availableOn(p, mode))
+                FilledTonalButton(enabled = busy == null, onClick = { vm.installPackage(p.id) }) { Text(if (st?.ok == true) "Update" else "Install") }
             if (st != null && st.log.isNotBlank()) TextButton(onClick = { openLog = if (openLog == p.id) null else p.id }) { Text(if (openLog == p.id) "Hide log" else "Log") }
             if (st?.ok == true && app.switchboard.engine.Toolbox.kindOf(p) in setOf(app.switchboard.data.PackageKind.GIT, app.switchboard.data.PackageKind.URL))
                 TextButton(onClick = { vm.deletePackageFiles(p.id) }) { Text("Delete files") }

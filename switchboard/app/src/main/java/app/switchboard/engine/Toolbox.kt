@@ -253,7 +253,9 @@ object Toolbox {
         preset("Termux:API USB access", "termux-usb and libusb so programs in Termux can open USB devices (also install the Termux:API app from F-Droid)",
             "pkg install -y termux-api libusb && echo \"LOCATION=\$(command -v termux-usb)\"", null,
             "command -v termux-usb >/dev/null && echo \"LOCATION=\$(command -v termux-usb)\"", null),
-        preset("esptool", "Flash ESP32/ESP8266 boards", "command -v pip >/dev/null || pkg install -y python python-pip; pip install esptool",
+        // Termux has no prebuilt pip wheels for cryptography (pip would need Rust to build it), so take Termux's own package first.
+        preset("esptool", "Flash ESP32/ESP8266 boards",
+            "pkg install -y python python-pip python-cryptography || { apt update -y >/dev/null 2>&1; pkg install -y python python-pip python-cryptography; }; pip install esptool",
             "python3 -m pip install --user esptool", "command -v esptool.py >/dev/null || command -v esptool >/dev/null", "python3 -m pip show esptool >/dev/null 2>&1"),
         preset("arduino-cli", "Compile and upload Arduino sketches",
             "pkg install -y curl; mkdir -p \$HOME/switchboard-tools/bin && curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=\$HOME/switchboard-tools/bin sh && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\"",
@@ -273,6 +275,9 @@ object Toolbox {
         val c = catalog.firstOrNull { it.name == p.name } ?: return p
         return p.copy(source = c.source, description = c.description, kind = c.kind, scripts = c.scripts, checks = c.checks)
     }
+
+    /** The command this tool runs on [mode] (for display): the machine's own script, else the source. */
+    fun commandFor(p: ToolPackage, mode: RunnerMode): String = p.scripts[mode.name] ?: p.source
 
     /** The one-tap developer set. */
     val developerSet = listOf("Android SDK", "ADB & fastboot", "Node.js + npm", "Python 3 + pip", "Git", "Java (OpenJDK 17)")

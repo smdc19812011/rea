@@ -95,6 +95,10 @@ class ToolboxTest {
         assertTrue("USB utilities" in remote && "USB utilities" !in termux) // Termux has no usbutils package
         val py = Toolbox.installScript(Toolbox.catalog.first { it.name == "Python 3 + pip" }, RunnerMode.TERMUX)!!
         assertTrue(py, py.contains("|| { apt update -y") ) // stale package lists are refreshed once
+        val esp = Toolbox.installScript(Toolbox.catalog.first { it.name == "esptool" }, RunnerMode.TERMUX)!!
+        assertTrue(esp, esp.indexOf("python-cryptography") in 0 until esp.indexOf("pip install esptool")) // no Rust build on Termux
+        assertTrue(!Toolbox.availableOn(Toolbox.catalog.first { it.name == "USB utilities" }, RunnerMode.TERMUX))
+        assertEquals("pkg install -y jq || { apt update -y >/dev/null 2>&1; pkg install -y jq; }", Toolbox.commandFor(Toolbox.catalog.first { it.name == "jq" }, RunnerMode.TERMUX))
         assertEquals(Toolbox.catalog.size, Toolbox.catalog.map { it.name }.toSet().size) // names are unique
         // Android SDK on Termux uses ARM build tools from packages and fetches android.jar with sdkmanager.
         val sdk = Toolbox.catalog.first { it.name == "Android SDK" }
