@@ -217,7 +217,8 @@ private fun AssistantBlock(
 ) {
     val clipboard = LocalClipboardManager.current
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (m.text.isEmpty() && m.toolCalls.isEmpty() && live) TypingDots()
+        if (m.thinking.isNotBlank()) ThinkingBlock(m.thinking, live = live && m.text.isEmpty() && m.toolCalls.isEmpty())
+        if (m.text.isEmpty() && m.toolCalls.isEmpty() && live && m.thinking.isBlank()) TypingDots()
         else if (m.text.isNotEmpty()) MarkdownText(m.text, if (m.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
         m.attachments.forEach { AttachmentCard(it) } // images etc. the model produced itself
         m.toolCalls.forEach { c ->
@@ -409,5 +410,24 @@ private fun AttachmentCard(a: app.switchboard.data.Attachment) {
             }
             note?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
         }
+    }
+}
+
+
+/** The model's reasoning: a live preview while it thinks, then a collapsed "Thought process" you can open. */
+@Composable
+private fun ThinkingBlock(text: String, live: Boolean) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(enabled = !live) { open = !open }
+        .background(MaterialTheme.colorScheme.surfaceContainer).padding(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (live) CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 2.dp) else Icon(if (open) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.ArrowForward, null, Modifier.size(14.dp))
+            Spacer(Modifier.size(6.dp))
+            Text(if (live) "Thinking… (${text.split(Regex("\\s+")).size} words)" else "Thought process", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (live || open) Text(if (live) text.takeLast(400) else text, style = MaterialTheme.typography.bodySmall,
+            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = if (live) 4 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
     }
 }

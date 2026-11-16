@@ -182,37 +182,43 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
         adbClients.values.forEach { it.close() }; adbClients.clear()
     }
 
-    private suspend fun adb(a: JsonObject, fetch: suspend (String, File) -> Unit): ToolResult = withContext(Dispatchers.IO) {
-        val target = a.str("target")?.trim()?.ifBlank { null } ?: return@withContext ToolResult("Missing 'target' (IP or host[:port]).", true)
+    private suspend fun adb(a: JsonObject, fetch: suspend (String, File) -> Unit): ToolResult {
+        val target = a.str("target")?.trim()?.ifBlank { null } ?: return ToolResult("Missing 'target' (IP or host[:port]).", true)
         val host = target.substringBeforeLast(':').takeIf { ':' in target && target.substringAfterLast(':').all(Char::isDigit) } ?: target
         val port = if (host != target) target.substringAfterLast(':').toInt() else 5555
         val key = "$host:$port"
-        if (a.str("action") == "disconnect") { adbClients.remove(key)?.close(); return@withContext ToolResult("Disconnected from $key.") }
-        val client = adbClients[key]?.takeIf { it.isConnected } ?: AdbClient(File(ctx.filesDir, "keys/adbkey.pk8")).also {
-            it.connect(host, port) // first time: the device shows "Allow USB debugging?" and we wait for it
-            adbClients[key] = it
+        val action = a.str("action")
+        if (action == "disconnect") { adbClients.remove(key)?.close(); return ToolResult("Disconnected from $key.") }
+        if (action !in setOf("shell", "push", "install")) return ToolResult("action must be shell, push, install or disconnect.", true)
+        // Files come from the tool machine first (suspending), then the blocking ADB work runs so Stop can close the socket.
+        val local: File? = if (action == "shell") null else {
+            val path = a.str("local_path") ?: return ToolResult("Missing 'local_path'.", true)
+            File(ctx.cacheDir, "adb/${File(path).name}").also { it.parentFile?.mkdirs(); fetch(path, it) }
         }
-        fun local(): File {
-            val path = a.str("local_path") ?: throw IllegalArgumentException("Missing 'local_path'.")
-            val f = File(ctx.cacheDir, "adb/${File(path).name}")
-            kotlinx.coroutines.runBlocking { fetch(path, f) }
-            return f
-        }
-        try {
-            when (a.str("action")) {
-                "shell" -> ToolResult("${client.shell(a.str("command") ?: return@withContext ToolResult("Missing 'command'.", true)).take(50_000).ifBlank { "(no output)" }}")
-                "push" -> {
-                    val f = local(); val remote = a.str("remote_path") ?: "/sdcard/Download/${f.name}"
-                    client.push(f.readBytes(), remote); f.delete()
-                    ToolResult("Pushed ${f.length()} bytes to $remote on $key.")
+        if (action == "shell" && a.str("command").isNullOrBlank()) return ToolResult("Missing 'command'.", true)
+        var fresh: AdbClient? = null
+        return try {
+            interruptibly({ fresh?.close(); adbClients.remove(key)?.close() }) {
+                val client = adbClients[key]?.takeIf { it.isConnected } ?: AdbClient(File(ctx.filesDir, "keys/adbkey.pk8")).also {
+                    fresh = it
+                    it.connect(host, port) // first time: the device shows "Allow USB debugging?" and we wait for it
+                    adbClients[key] = it
                 }
-                "install" -> { val f = local(); val out = client.install(f.readBytes(), f.name.replace(Regex("[^A-Za-z0-9._-]"), "_")); f.delete(); ToolResult(out, isError = !out.contains("Success")) }
-                else -> ToolResult("action must be shell, push, install or disconnect.", true)
+                when (action) {
+                    "shell" -> ToolResult(client.shell(a.str("command")!!).take(50_000).ifBlank { "(no output)" })
+                    "push" -> {
+                        val remote = a.str("remote_path") ?: "/sdcard/Download/${local!!.name}"
+                        client.push(local!!.readBytes(), remote)
+                        ToolResult("Pushed ${local.length()} bytes to $remote on $key.")
+                    }
+                    else -> client.install(local!!.readBytes(), local.name.replace(Regex("[^A-Za-z0-9._-]"), "_")).let { ToolResult(it, isError = !it.contains("Success")) }
+                }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) { throw e
         } catch (e: Exception) {
             adbClients.remove(key)?.close() // reconnect next time
-            ToolResult("ADB ${a.str("action")} failed on $key: ${e.message}", true)
-        }
+            ToolResult("ADB $action failed on $key: ${e.message}", true)
+        } finally { local?.delete() }
     }
 
     private fun session(a: JsonObject) = sessions[a.str("handle")] ?: throw IllegalArgumentException("No open device with handle '${a.str("handle")}'. Call device_connect first.")
@@ -450,7 +456,7 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
             ?: if (method in setOf("POST", "PUT", "PATCH")) ByteArray(0).toRequestBody() else null
         val b = Request.Builder().url(url).method(method, body)
         (a["headers"] as? JsonObject)?.forEach { (k, v) -> (v as? kotlinx.serialization.json.JsonPrimitive)?.content?.let { b.header(k, it) } }
-        http.newCall(b.build()).execute().use { r ->
+        http.newCall(b.build()).cancellable { r ->
             val bytes = r.body?.bytes() ?: ByteArray(0)
             val type = r.header("Content-Type").orEmpty()
             val text = if (looksText(bytes) || "json" in type || "text" in type || "xml" in type) bytes.decodeToString().take(50_000)
@@ -464,15 +470,15 @@ class DeviceManager(private val ctx: Context, private val askPermissions: suspen
         val rel = a.str("path")?.takeIf { it.isNotBlank() } ?: url.pathSegments.lastOrNull()?.ifBlank { null } ?: "download"
         val dest = (if (rel.startsWith("/")) File(rel) else File(workspace, rel)).normalize()
         val client = http.newBuilder().readTimeout(10, TimeUnit.MINUTES).build()
-        client.newCall(Request.Builder().url(url).build()).execute().use { r ->
-            if (!r.isSuccessful) return@withContext ToolResult("Download failed: HTTP ${r.code}", true)
+        client.newCall(Request.Builder().url(url).build()).cancellable { r ->
+            if (!r.isSuccessful) return@cancellable ToolResult("Download failed: HTTP ${r.code}", true)
             dest.parentFile?.mkdirs()
             var total = 0L
             r.body!!.byteStream().use { input -> dest.outputStream().use { out ->
                 val buf = ByteArray(64 * 1024)
                 while (true) {
                     val n = input.read(buf); if (n < 0) break
-                    total += n; if (total > 500L * 1024 * 1024) { out.close(); dest.delete(); return@withContext ToolResult("Stopped: larger than 500 MB.", true) }
+                    total += n; if (total > 500L * 1024 * 1024) { out.close(); dest.delete(); return@cancellable ToolResult("Stopped: larger than 500 MB.", true) }
                     out.write(buf, 0, n)
                 }
             } }

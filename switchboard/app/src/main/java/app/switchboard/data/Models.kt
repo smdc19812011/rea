@@ -94,6 +94,8 @@ data class ChatMessage(
     val toolCalls: List<ToolCall> = emptyList(),
     /** Assistant only: exact Anthropic content blocks (incl. thinking signatures) for faithful replay. */
     val anthropicBlocks: String? = null,
+    /** Assistant only: the model's visible reasoning, shown collapsed under the reply (not sent back to models). */
+    val thinking: String = "",
     /** Tool only: which call this result answers. */
     val toolCallId: String? = null,
     /** Tool only: files delivered to the chat by send_file. */

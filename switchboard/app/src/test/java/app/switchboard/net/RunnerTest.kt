@@ -1,6 +1,7 @@
 package app.switchboard.net
 
 import app.switchboard.data.ToolCall
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
@@ -69,5 +70,13 @@ class RunnerTest {
         val dest = File(workspace, "received.apk"); runner.download("out/app.apk", dest)
         assertTrue(dest.readBytes().contentEquals(bytes))
         assertEquals("out/app.apk", Runner.describe(ToolCall("8", Runner.SEND_FILE, """{"path":"out/app.apk","caption":"here"}""")))
+    }
+
+    @Test fun stopAbortsALongCommand() = runBlocking {
+        val job = launch { runner.execute(ToolCall("9", "run_command", """{"command":"sleep 30","timeout_sec":60}""")) }
+        kotlinx.coroutines.delay(500)
+        val t0 = System.currentTimeMillis()
+        job.cancel(); job.join()
+        assertTrue("cancel took ${System.currentTimeMillis() - t0} ms", System.currentTimeMillis() - t0 < 1500)
     }
 }

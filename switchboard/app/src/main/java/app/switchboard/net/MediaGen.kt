@@ -57,22 +57,22 @@ class MediaGen {
         second.getOrNull() ?: throw ApiException("$model couldn't make an image (${first.exceptionOrNull()?.message}; ${second.exceptionOrNull()?.message})")
     }
 
-    private fun imageViaChat(p: Provider, model: String, prompt: String, unrestricted: Boolean): Pair<List<GeneratedFile>, String> {
+    private suspend fun imageViaChat(p: Provider, model: String, prompt: String, unrestricted: Boolean): Pair<List<GeneratedFile>, String> {
         val o = post(p, "/chat/completions", buildJsonObject {
             put("model", model); put("stream", false)
             putJsonArray("modalities") { add(JsonPrimitive("image")); add(JsonPrimitive("text")) }
             putJsonArray("messages") { add(buildJsonObject { put("role", "user"); put("content", prompt) }) }
         }, unrestricted)
         val msg = ((o["choices"] as? JsonArray)?.firstOrNull() as? JsonObject)?.get("message") as? JsonObject ?: throw ApiException("no message")
-        val files = (msg["images"] as? JsonArray).orEmpty().mapNotNull { ((it as? JsonObject)?.get("image_url") as? JsonObject)?.str("url")?.let(::fetch) }
+        val files = (msg["images"] as? JsonArray).orEmpty().mapNotNull { ((it as? JsonObject)?.get("image_url") as? JsonObject)?.str("url")?.let { fetch(it) } }
         if (files.isEmpty()) throw ApiException("no image in the reply")
         return files to msg.str("content").orEmpty()
     }
 
-    private fun imageViaApi(p: Provider, model: String, prompt: String, unrestricted: Boolean): Pair<List<GeneratedFile>, String> {
+    private suspend fun imageViaApi(p: Provider, model: String, prompt: String, unrestricted: Boolean): Pair<List<GeneratedFile>, String> {
         val o = post(p, "/images/generations", buildJsonObject { put("model", model); put("prompt", prompt); put("n", 1) }, unrestricted)
         val data = (o["data"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
-        val files = data.mapNotNull { d -> d.str("b64_json")?.let { GeneratedFile(Base64.getMimeDecoder().decode(it), "image/png") } ?: d.str("url")?.let(::fetch) }
+        val files = data.mapNotNull { d -> d.str("b64_json")?.let { GeneratedFile(Base64.getMimeDecoder().decode(it), "image/png") } ?: d.str("url")?.let { fetch(it) } }
         if (files.isEmpty()) throw ApiException("no image returned")
         return files to data.firstOrNull()?.str("revised_prompt").orEmpty()
     }
@@ -118,8 +118,8 @@ class MediaGen {
 
     // ---------- HTTP ----------
 
-    private fun fetch(url: String): GeneratedFile? = decodeDataUrl(url) ?: runCatching {
-        http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+    private suspend fun fetch(url: String): GeneratedFile? = decodeDataUrl(url) ?: runCatching {
+        http.newCall(Request.Builder().url(url).build()).cancellable { r ->
             if (!r.isSuccessful) null else GeneratedFile(r.body!!.bytes(), r.header("Content-Type")?.substringBefore(';') ?: "image/png")
         }
     }.getOrNull()
@@ -138,8 +138,8 @@ class MediaGen {
         return ApiException("HTTP $code: ${(o?.get("error") as? JsonObject)?.str("message") ?: o?.str("error") ?: text.take(300)}", code)
     }
 
-    private fun post(p: Provider, path: String, body: JsonObject, unrestricted: Boolean): JsonObject =
-        http.newCall(request(p, path, unrestricted).post(body.toString().toRequestBody(jsonType)).build()).execute().use { r ->
+    private suspend fun post(p: Provider, path: String, body: JsonObject, unrestricted: Boolean): JsonObject =
+        http.newCall(request(p, path, unrestricted).post(body.toString().toRequestBody(jsonType)).build()).cancellable { r ->
             val text = r.body?.string().orEmpty()
             val o = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
             if (!r.isSuccessful || o == null) throw failure(r.code, text)
@@ -147,22 +147,22 @@ class MediaGen {
             o
         }
 
-    private fun postRaw(p: Provider, path: String, body: JsonObject, unrestricted: Boolean): ByteArray =
-        http.newCall(request(p, path, unrestricted).post(body.toString().toRequestBody(jsonType)).build()).execute().use { r ->
+    private suspend fun postRaw(p: Provider, path: String, body: JsonObject, unrestricted: Boolean): ByteArray =
+        http.newCall(request(p, path, unrestricted).post(body.toString().toRequestBody(jsonType)).build()).cancellable { r ->
             if (!r.isSuccessful) throw failure(r.code, r.body?.string().orEmpty())
             if (r.header("Content-Type").orEmpty().contains("json")) throw ApiException("expected audio, got JSON")
             r.body!!.bytes()
         }
 
-    private fun get(p: Provider, path: String, unrestricted: Boolean): JsonObject =
-        http.newCall(request(p, path, unrestricted).build()).execute().use { r ->
+    private suspend fun get(p: Provider, path: String, unrestricted: Boolean): JsonObject =
+        http.newCall(request(p, path, unrestricted).build()).cancellable { r ->
             val text = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw failure(r.code, text)
             json.parseToJsonElement(text).jsonObject
         }
 
-    private fun getRaw(p: Provider, path: String, unrestricted: Boolean): ByteArray =
-        http.newCall(request(p, path, unrestricted).build()).execute().use { r ->
+    private suspend fun getRaw(p: Provider, path: String, unrestricted: Boolean): ByteArray =
+        http.newCall(request(p, path, unrestricted).build()).cancellable { r ->
             if (!r.isSuccessful) throw failure(r.code, r.body?.string().orEmpty())
             r.body!!.bytes()
         }

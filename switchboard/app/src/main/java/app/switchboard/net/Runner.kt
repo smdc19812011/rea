@@ -42,24 +42,24 @@ class Runner(private val baseUrl: String, private val token: String, private val
     private val jsonType = "application/json".toMediaType()
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build()
 
-    suspend fun info(): JsonObject = withContext(Dispatchers.IO) { getJson("/info") }
+    suspend fun info(): JsonObject = getJson("/info")
 
-    suspend fun exec(command: String, cwd: String?, timeoutSec: Int): JsonObject = withContext(Dispatchers.IO) {
+    suspend fun exec(command: String, cwd: String?, timeoutSec: Int): JsonObject = run {
         val client = http.newBuilder().readTimeout(timeoutSec + 30L, TimeUnit.SECONDS).build()
         postJson("/exec", buildJsonObject { put("command", command); cwd?.let { put("cwd", it) }; put("timeout_sec", timeoutSec) }, client)
     }
 
-    suspend fun write(path: String, content: String, encoding: String? = null): JsonObject = withContext(Dispatchers.IO) {
+    suspend fun write(path: String, content: String, encoding: String? = null): JsonObject = run {
         postJson("/write", buildJsonObject { put("path", path); put("content", content); encoding?.let { put("encoding", it) } })
     }
 
-    suspend fun read(path: String): JsonObject = withContext(Dispatchers.IO) { postJson("/read", buildJsonObject { put("path", path) }) }
+    suspend fun read(path: String): JsonObject = postJson("/read", buildJsonObject { put("path", path) })
 
     /** Streams a file from the runner into [dest]. */
-    suspend fun download(path: String, dest: File) = withContext(Dispatchers.IO) {
+    suspend fun download(path: String, dest: File) = run {
         val url = url("/download").newBuilder().addQueryParameter("path", path).build()
         val client = http.newBuilder().readTimeout(5, TimeUnit.MINUTES).build()
-        client.newCall(Request.Builder().url(url).header("Authorization", "Bearer $token").build()).execute().use { r ->
+        client.newCall(Request.Builder().url(url).header("Authorization", "Bearer $token").build()).cancellable { r ->
             if (!r.isSuccessful) throw ApiException(errorOf(r.code, r.body?.string().orEmpty()))
             dest.parentFile?.mkdirs()
             dest.outputStream().use { out -> r.body!!.byteStream().copyTo(out) }
@@ -70,16 +70,16 @@ class Runner(private val baseUrl: String, private val token: String, private val
         ?.also { if (!it.isHttps && !unrestricted && !isLocalHost(it.host)) throw ApiException("Runner uses plain http:// on a non-local host. Use 127.0.0.1 (Termux), https://, or turn on Unrestricted mode.") }
         ?: throw ApiException("Runner URL is not valid: $baseUrl")
 
-    private fun getJson(path: String): JsonObject =
-        http.newCall(Request.Builder().url(url(path)).header("Authorization", "Bearer $token").build()).execute().use { r ->
+    private suspend fun getJson(path: String): JsonObject =
+        http.newCall(Request.Builder().url(url(path)).header("Authorization", "Bearer $token").build()).cancellable { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw ApiException(errorOf(r.code, body))
             json.parseToJsonElement(body).jsonObject
         }
 
-    private fun postJson(path: String, body: JsonObject, client: OkHttpClient = http): JsonObject =
+    private suspend fun postJson(path: String, body: JsonObject, client: OkHttpClient = http): JsonObject =
         client.newCall(Request.Builder().url(url(path)).header("Authorization", "Bearer $token").post(body.toString().toRequestBody(jsonType)).build())
-            .execute().use { r ->
+            .cancellable { r ->
                 val text = r.body?.string().orEmpty()
                 if (!r.isSuccessful) throw ApiException(errorOf(r.code, text))
                 json.parseToJsonElement(text).jsonObject

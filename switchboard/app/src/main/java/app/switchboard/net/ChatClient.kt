@@ -10,6 +10,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -74,6 +75,8 @@ data class ToolSpec(val name: String, val description: String, val schema: JsonO
 
 sealed interface StreamEvent {
     data class TextDelta(val text: String) : StreamEvent
+    /** Reasoning the model streams before answering (DeepSeek/NIM reasoning_content, OpenRouter reasoning, Claude thinking summaries). */
+    data class ThinkingDelta(val text: String) : StreamEvent
     /** Emitted once at the end of a successful turn. */
     /** [images] are data: or https: URLs of images the model produced itself (e.g. OpenRouter image models). */
     data class TurnEnd(val text: String, val toolCalls: List<ToolCall>, val anthropicBlocks: String?, val images: List<String> = emptyList()) : StreamEvent
@@ -91,7 +94,8 @@ fun isLocalHost(host: String): Boolean {
 class ChatClient {
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.MINUTES) // long thinking pauses between SSE events
+        // Servers send data or keep-alive pings while a model thinks; 2.5 min of total silence means the connection is dead.
+        .readTimeout(150, TimeUnit.SECONDS)
         .build()
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonType = "application/json".toMediaType()
@@ -104,24 +108,28 @@ class ChatClient {
         }
         checkTransport(request, opts.unrestricted)
         val call = http.newCall(request)
-        try {
-            call.execute().use { resp ->
-                if (!resp.isSuccessful) throw ApiException(errorText(resp), resp.code)
-                val source = resp.body?.source() ?: throw ApiException("Empty response")
-                val acc: TurnAccumulator = if (p.kind == ApiKind.ANTHROPIC) AnthropicAccumulator() else OpenAiAccumulator()
-                while (true) {
-                    val line = source.readUtf8Line() ?: break
-                    if (!line.startsWith("data:")) continue
-                    val data = line.removePrefix("data:").trim()
-                    if (data == "[DONE]") break
-                    val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
-                    acc.accept(obj)?.let { trySend(StreamEvent.TextDelta(it)) }
+        // The blocking read runs in a child; awaitClose is registered right away, so Stop cancels the call immediately.
+        launch(Dispatchers.IO) {
+            try {
+                call.execute().use { resp ->
+                    if (!resp.isSuccessful) throw ApiException(errorText(resp), resp.code)
+                    val source = resp.body?.source() ?: throw ApiException("Empty response")
+                    val acc: TurnAccumulator = if (p.kind == ApiKind.ANTHROPIC) AnthropicAccumulator() else OpenAiAccumulator()
+                    while (true) {
+                        val line = source.readUtf8Line() ?: break
+                        if (!line.startsWith("data:")) continue
+                        val data = line.removePrefix("data:").trim()
+                        if (data == "[DONE]") break
+                        val obj = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
+                        acc.accept(obj)?.let { trySend(StreamEvent.TextDelta(it)) }
+                        acc.takeThinking()?.let { trySend(StreamEvent.ThinkingDelta(it)) }
+                    }
+                    trySend(acc.finish())
                 }
-                trySend(acc.finish())
+                close()
+            } catch (e: Exception) {
+                close(if (call.isCanceled()) null else e)
             }
-            close()
-        } catch (e: Exception) {
-            close(if (call.isCanceled()) null else e)
         }
         awaitClose { call.cancel() }
     }.flowOn(Dispatchers.IO)
@@ -134,7 +142,7 @@ class ChatClient {
         authHeaders(b, p)
         val req = b.build()
         checkTransport(req, unrestricted)
-        http.newCall(req).execute().use { resp ->
+        http.newCall(req).cancellable { resp ->
             if (!resp.isSuccessful) throw ApiException(errorText(resp), resp.code)
             val root = json.parseToJsonElement(resp.body!!.string()).jsonObject
             root["data"]?.jsonArray.orEmpty().mapNotNull { el ->
@@ -195,6 +203,8 @@ class ChatClient {
     private interface TurnAccumulator {
         /** Returns visible text to show, if any. */
         fun accept(o: JsonObject): String?
+        /** Reasoning text received since the last call, if any. */
+        fun takeThinking(): String? = null
         fun finish(): StreamEvent.TurnEnd
     }
 
@@ -203,6 +213,8 @@ class ChatClient {
         private val blocks = sortedMapOf<Int, MutableMap<String, JsonElement>>()
         private val partialJson = mutableMapOf<Int, StringBuilder>()
         private val text = StringBuilder()
+        private val thinking = StringBuilder()
+        override fun takeThinking(): String? = thinking.takeIf { it.isNotEmpty() }?.toString()?.also { thinking.clear() }
 
         override fun accept(o: JsonObject): String? {
             when (o.str("type")) {
@@ -216,7 +228,7 @@ class ChatClient {
                     val b = blocks.getOrPut(i) { mutableMapOf("type" to JsonPrimitive("text"), "text" to JsonPrimitive("")) }
                     when (d.str("type")) {
                         "text_delta" -> { val t = d.str("text").orEmpty(); b.append("text", t); text.append(t); return t }
-                        "thinking_delta" -> b.append("thinking", d.str("thinking").orEmpty())
+                        "thinking_delta" -> { val t = d.str("thinking").orEmpty(); b.append("thinking", t); thinking.append(t) }
                         "signature_delta" -> b["signature"] = JsonPrimitive(d.str("signature").orEmpty())
                         "input_json_delta" -> partialJson.getOrPut(i) { StringBuilder() }.append(d.str("partial_json").orEmpty())
                     }
@@ -289,6 +301,8 @@ class ChatClient {
         private class Partial(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder())
         private val calls = sortedMapOf<Int, Partial>()
         private val images = mutableListOf<String>()
+        private val thinking = StringBuilder()
+        override fun takeThinking(): String? = thinking.takeIf { it.isNotEmpty() }?.toString()?.also { thinking.clear() }
 
         override fun accept(o: JsonObject): String? {
             o["error"]?.let { throw ApiException((it as? JsonObject)?.str("message") ?: it.toString()) }
@@ -304,6 +318,7 @@ class ChatClient {
                 tc.str("id")?.let { if (it.isNotEmpty()) p.id = it }
                 tc["function"]?.jsonObject?.let { f -> f.str("name")?.let { p.name += it }; f.str("arguments")?.let { p.args.append(it) } }
             }
+            (delta?.str("reasoning_content") ?: delta?.str("reasoning"))?.let { thinking.append(it) }
             val t = delta?.str("content")
             if (!t.isNullOrEmpty()) text.append(t)
             if (choice.str("finish_reason") == "length") return "\n\n_[Stopped: reached the max output tokens limit.]_".also { text.append(it) }

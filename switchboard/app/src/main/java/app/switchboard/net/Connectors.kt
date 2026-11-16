@@ -86,7 +86,8 @@ class Connectors(private val tokens: TokenStore) {
                 routes[name] = c.id to ""
                 specs += ToolSpec(name, "Call the ${c.name} REST API (base URL ${c.url}). ${c.description}".trim(), restSchema)
             }
-            ConnectorKind.MCP -> runCatching { mcpTools[c.id] ?: loadMcpTools(c) }
+            ConnectorKind.MCP -> failedAt[c.id]?.takeIf { System.currentTimeMillis() - it.first < 5 * 60_000 }?.let { problems += "${c.name}: ${it.second}" } ?: runCatching { mcpTools[c.id] ?: loadMcpTools(c) }
+                .onFailure { failedAt[c.id] = System.currentTimeMillis() to (it.message ?: "unreachable") }
                 .onSuccess { tools ->
                     tools.forEach { t ->
                         val name = ("mcp__" + slug(c.name, 20) + "__" + t.name.replace(Regex("[^A-Za-z0-9_-]"), "_")).take(64)
@@ -104,14 +105,19 @@ class Connectors(private val tokens: TokenStore) {
         val c = connectors.firstOrNull { it.id == cid && it.enabled } ?: return ToolResult("That connector was removed or turned off.", true)
         val args = runCatching { json.parseToJsonElement(call.arguments).jsonObject }.getOrElse { return ToolResult("Arguments were not valid JSON.", true) }
         return runCatching {
-            when (c.kind) {
-                ConnectorKind.MCP -> callMcpTool(c, real, args)
-                ConnectorKind.REST -> callRest(c, args, unrestricted)
-            }
+            try {
+                when (c.kind) {
+                    ConnectorKind.MCP -> callMcpTool(c, real, args)
+                    ConnectorKind.REST -> callRest(c, args, unrestricted)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) { http.dispatcher.cancelAll(); throw e }
         }.getOrElse { ToolResult(it.message ?: it.javaClass.simpleName, true) }
     }
 
-    fun forget(connectorId: String) { mcpTools.remove(connectorId); mcpSession.remove(connectorId); mcpReady.remove(connectorId) }
+    fun forget(connectorId: String) { mcpTools.remove(connectorId); mcpSession.remove(connectorId); mcpReady.remove(connectorId); failedAt.remove(connectorId) }
+
+    /** Connectors whose tool list couldn't load: skipped for 5 minutes instead of slowing every message down. */
+    private val failedAt = ConcurrentHashMap<String, Pair<Long, String>>()
 
     // ---------- auth ----------
 
@@ -227,7 +233,9 @@ class Connectors(private val tokens: TokenStore) {
 
     // ---------- MCP (Streamable HTTP) ----------
 
-    suspend fun loadMcpTools(c: Connector): List<McpTool> = withContext(Dispatchers.IO) {
+    suspend fun loadMcpTools(c: Connector): List<McpTool> = interruptibly({ http.dispatcher.cancelAll() }) { kotlinx.coroutines.runBlocking { loadMcpToolsBlocking(c) } }
+
+    private suspend fun loadMcpToolsBlocking(c: Connector): List<McpTool> = withContext(Dispatchers.IO) {
         ensureInit(c)
         val out = mutableListOf<McpTool>(); var cursor: String? = null
         do {

@@ -242,7 +242,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         respond(provider)
     }
 
-    fun stop() { job?.cancel() }
+    /**
+     * Stop: cancels the reply. Network calls abort at once; as a safety net, if anything is still busy after
+     * 2 seconds, the screen is reset anyway so the app never stays stuck.
+     */
+    fun stop() {
+        val j = job ?: return
+        j.cancel()
+        viewModelScope.launch {
+            delay(2000)
+            if (j.isActive && job === j) {
+                streaming = false; toolStatus = null; pendingApproval = null
+                approvalDecision?.complete(Approval.DENY)
+                current = current.copy(messages = current.messages.map { m ->
+                    if (m.role == Role.ASSISTANT && m.text.isEmpty() && m.toolCalls.isEmpty() && m.attachments.isEmpty()) m.copy(text = "(stopped)", isError = true) else m
+                })
+                WorkService.stop(getApplication())
+                persistCurrent()
+            }
+        }
+    }
 
     private fun respond(provider: Provider) {
         streaming = true
@@ -398,11 +417,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val reply = ChatMessage(role = Role.ASSISTANT, text = "", source = "${provider.name} · ${provider.model}")
         current = current.copy(messages = history + reply)
         val buf = StringBuilder()
+        val thinking = StringBuilder()
         try {
             var calls: List<ToolCall> = emptyList()
             client.stream(provider, history, opts).collect { ev ->
                 when (ev) {
                     is StreamEvent.TextDelta -> { buf.append(ev.text); updateReply(reply.id) { it.copy(text = buf.toString()) } }
+                    is StreamEvent.ThinkingDelta -> { thinking.append(ev.text); updateReply(reply.id) { it.copy(thinking = thinking.takeLast(20_000).toString()) } }
                     is StreamEvent.TurnEnd -> {
                         calls = ev.toolCalls
                         val pics = ev.images.mapIndexedNotNull { i, url ->
@@ -543,23 +564,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Termux mode: if the runner isn't answering, start it through Termux and wait for it (first start installs python). */
+    /** When the Termux runner last failed to start; it isn't retried automatically for 10 minutes (Settings can retry now). */
+    private var runnerFailedAt = 0L
+
     private suspend fun describeHost(): String {
         val h = host()
         if (settings.runnerMode != RunnerMode.TERMUX) return h.describe()
         runCatching { return h.describe() }
+        if (System.currentTimeMillis() - runnerFailedAt < 10 * 60_000)
+            throw IllegalStateException("The Termux runner isn't running (it failed to start a few minutes ago). Use Settings > Tools > Start runner now.")
         toolStatus = "Starting the runner in Termux…"
         try {
             Termux.startRunner(getApplication(), termuxToken())
-            repeat(90) {
+            repeat(45) {
                 delay(1000)
-                runCatching { return h.describe() }
+                runCatching { return h.describe().also { runnerFailedAt = 0 } }
             }
-            throw IllegalStateException("Termux didn't start the runner within 90 s. Open Termux to see what happened.")
+            runnerFailedAt = System.currentTimeMillis()
+            throw IllegalStateException("Termux didn't start the runner within 45 s. Open Termux to see what happened, then use Settings > Tools > Start runner now.")
+        } catch (e: Exception) {
+            runnerFailedAt = System.currentTimeMillis(); throw e
         } finally { toolStatus = null }
     }
 
     /** Settings button: start (or restart) the Termux runner now. */
     suspend fun startTermuxRunner(): Result<String> = runCatching {
+        runnerFailedAt = 0
         Termux.startRunner(getApplication(), termuxToken())
         val h = host()
         repeat(90) { delay(1000); runCatching { return@runCatching "Runner started: ${h.describe()}" } }
