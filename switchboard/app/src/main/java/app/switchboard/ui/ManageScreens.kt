@@ -446,11 +446,19 @@ private fun ToolboxPage(vm: ChatViewModel) {
     var openLog by remember { mutableStateOf<String?>(null) }
     Hint("Tools installed once on $machine (where Tools run; change it in Settings > Tools). Chats, agents, skills and scheduled tasks are told what's installed and where, so they use these instead of downloading again.")
     if (!s.toolsEnabled) Text("Turn on Tools in Settings so the model can use these.", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-    if (mode == app.switchboard.data.RunnerMode.PHONE) Hint("On this phone, only GitHub repositories and download links can be installed. Packages (Python, Java, compilers…) need Termux or Computer mode.")
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilledTonalButton(onClick = { adding = true }) { Text("Add common tools") }
-        OutlinedButton(onClick = { editing = app.switchboard.data.ToolPackage(name = "", source = "") }) { Text("Add your own") }
+    if (mode == app.switchboard.data.RunnerMode.PHONE) {
+        Text("Tools are set to run on this phone's sandbox, which can only take GitHub repos and downloads. The Android SDK, ADB, npm, Python and the rest need Termux (on this phone) or a computer.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        OutlinedButton(onClick = { vm.setRunnerMode(app.switchboard.data.RunnerMode.TERMUX); vm.setToolsEnabled(true) }) { Text("Use Termux for tools") }
     }
+    val catalog = app.switchboard.engine.Toolbox.catalog
+    val added = s.packages.map { it.name }.toSet()
+    val devSet = catalog.filter { it.name in app.switchboard.engine.Toolbox.developerSet && app.switchboard.engine.Toolbox.availableOn(it, mode) }
+    if (devSet.any { p -> s.packages.firstOrNull { it.name == p.name }?.installs?.get(mode.name)?.ok != true })
+        FilledTonalButton(onClick = {
+            devSet.forEach { p -> val existing = s.packages.firstOrNull { it.name == p.name } ?: p.also { vm.upsertPackage(it) }; vm.installPackage(existing.id) }
+        }) { Text("Install the developer set (Android SDK, ADB, npm, Python, Git, Java)") }
+    OutlinedButton(onClick = { editing = app.switchboard.data.ToolPackage(name = "", source = "") }) { Text("Add your own tool or source") }
     if (s.packages.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = vm::installAll) { Text("Install all missing") }
         TextButton(onClick = vm::checkPackages) { Text("Check what's installed") }
@@ -482,6 +490,22 @@ private fun ToolboxPage(vm: ChatViewModel) {
         }
         if (openLog == p.id) Text(st?.log.orEmpty(), style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
             modifier = Modifier.padding(start = 16.dp))
+    }
+    // Every built-in tool, always visible; ones already in the toolbox are listed above.
+    val more = catalog.filter { it.name !in added }
+    if (more.isNotEmpty()) {
+        HorizontalDivider()
+        Text("Common tools", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp))
+        more.forEach { p ->
+            val ok = app.switchboard.engine.Toolbox.availableOn(p, mode)
+            ListItem(
+                headlineContent = { Text(p.name) },
+                supportingContent = { Text(if (ok) p.description else "${p.description}\nNeeds ${if (p.scripts.keys == setOf(app.switchboard.data.RunnerMode.TERMUX.name)) "Termux" else "Termux or a computer"}") },
+                trailingContent = {
+                    TextButton(enabled = ok, onClick = { vm.upsertPackage(p); vm.installPackage(p.id) }) { Text("Add & install") }
+                },
+            )
+        }
     }
     if (adding) PresetPicker(vm, onDismiss = { adding = false })
     editing?.let { p -> PackageDialog(p, s.packages.none { it.id == p.id }, onSave = { vm.upsertPackage(it); editing = null; vm.installPackage(it.id) }, onDismiss = { editing = null }) }

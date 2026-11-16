@@ -87,8 +87,16 @@ class ToolboxTest {
     @Test fun presetsMatchTheMachineAndNoteListsInstalledTools() {
         assertTrue(Toolbox.presets(RunnerMode.PHONE).map { it.name } == listOf("rea (GitHub)"))
         val termux = Toolbox.presets(RunnerMode.TERMUX).map { it.name }
-        assertTrue(termux.toString(), "Android build tools" in termux && "Android SDK (command-line)" !in termux && "rea (GitHub)" in termux)
-        assertTrue("Android SDK (command-line)" in Toolbox.presets(RunnerMode.REMOTE).map { it.name })
+        val remote = Toolbox.presets(RunnerMode.REMOTE).map { it.name }
+        // The developer set is available on both Termux and computers.
+        Toolbox.developerSet.forEach { assertTrue(it, it in termux && it in remote) }
+        assertTrue(termux.toString(), "Android build tools only" in termux && "Termux:API USB access" in termux && "rea (GitHub)" in termux)
+        assertTrue("Android build tools only" !in remote && "Termux:API USB access" !in remote)
+        assertEquals(Toolbox.catalog.size, Toolbox.catalog.map { it.name }.toSet().size) // names are unique
+        // Android SDK on Termux uses ARM build tools from packages and fetches android.jar with sdkmanager.
+        val sdk = Toolbox.catalog.first { it.name == "Android SDK" }
+        val termuxScript = Toolbox.installScript(sdk, RunnerMode.TERMUX)!!
+        assertTrue(termuxScript, "pkg install -y openjdk-17 aapt aapt2 d8 apksigner" in termuxScript && "platforms;android-35" in termuxScript && "ANDROID_HOME" in termuxScript)
         val pkgs = listOf(
             ToolPackage(name = "rea (GitHub)", source = "https://github.com/smdc19812011/rea", installs = mapOf("TERMUX" to InstallState(1, true, "/data/home/switchboard-tools/rea-github"))),
             ToolPackage(name = "FFmpeg", source = "ffmpeg"))

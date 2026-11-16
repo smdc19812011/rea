@@ -181,43 +181,74 @@ object Toolbox {
 
     private const val SDK_URL = "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
 
-    /** Common tools; [mode] filters out the ones that machine can't install. */
-    fun presets(mode: RunnerMode): List<ToolPackage> = listOf(
-        pkg("Python 3", "Python with pip", "python", "python3 python3-pip", "python3"),
-        pkg("Node.js", "JavaScript runtime with npm", "nodejs", "nodejs npm", "node"),
+    /** Installs/updates ANDROID_HOME in the shell profile so every later command finds the SDK. */
+    private const val ANDROID_HOME_LINE = "grep -q 'ANDROID_HOME=' \$HOME/.bashrc 2>/dev/null || { echo \"export ANDROID_HOME=\$d\" >> \$HOME/.bashrc; echo 'export PATH=\$PATH:\$ANDROID_HOME/cmdline-tools/latest/bin:\$ANDROID_HOME/platform-tools' >> \$HOME/.bashrc; }; "
+    private const val SDK_FETCH = "mkdir -p \$d/cmdline-tools; cd \$d; " +
+        "if [ ! -x cmdline-tools/latest/bin/sdkmanager ]; then curl -fLo clt.zip $SDK_URL; unzip -qo clt.zip -d cmdline-tools; rm -rf cmdline-tools/latest; mv cmdline-tools/cmdline-tools cmdline-tools/latest; rm -f clt.zip; fi; "
+
+    /** Every built-in tool, for all machines (names are stable, so "already added" is found by name). */
+    val catalog: List<ToolPackage> by lazy { listOf(
+        // ---- developer set ----
+        preset("Android SDK", "Android developer SDK: sdkmanager, platform 35 (android.jar), build tools (aapt2, d8, apksigner, zipalign); sets ANDROID_HOME",
+            // Termux (ARM): Google's build-tools binaries are x86-only, so the build tools come from Termux packages; sdkmanager (Java) fetches the platform.
+            "set -e; pkg install -y openjdk-17 aapt aapt2 d8 apksigner zip unzip curl; d=\$HOME/switchboard-tools/android-sdk; " + SDK_FETCH +
+                "yes | cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d 'platforms;android-35' >/dev/null; " + ANDROID_HOME_LINE +
+                "echo 'For Gradle builds add android.aapt2FromMavenOverride='\$(command -v aapt2)' to gradle.properties'; echo \"LOCATION=\$d\"",
+            "set -e; command -v java >/dev/null || { echo 'Java is needed first (add Java (OpenJDK 17))'; exit 1; }; d=\$HOME/switchboard-tools/android-sdk; " + SDK_FETCH +
+                "yes | cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' >/dev/null; " + ANDROID_HOME_LINE + "echo \"LOCATION=\$d\"",
+            "d=\$HOME/switchboard-tools/android-sdk; [ -d \$d/platforms/android-35 ] && command -v aapt2 >/dev/null && echo \"LOCATION=\$d\"",
+            "d=\$HOME/switchboard-tools/android-sdk; [ -d \$d/platforms/android-35 ] && echo \"LOCATION=\$d\""),
+        pkg("ADB & fastboot", "Android platform tools: adb (incl. adb pair for Android 11+ wireless debugging) and fastboot", "android-tools", "adb fastboot", "adb"),
+        pkg("Node.js + npm", "JavaScript runtime with the npm package manager (and npx)", "nodejs", "nodejs npm", "npm"),
+        pkg("Python 3 + pip", "Python with the pip package manager", "python python-pip", "python3 python3-pip python3-venv", "python3"),
         pkg("Git", "Version control", "git", "git", "git"),
-        pkg("Java (OpenJDK 17)", "Java compiler and runtime", "openjdk-17", "openjdk-17-jdk", "javac"),
-        preset("Android build tools", "aapt2, d8, apksigner, zip and android.jar for building APKs",
+        pkg("Java (OpenJDK 17)", "Java compiler and runtime (needed by the Android SDK and Gradle)", "openjdk-17", "openjdk-17-jdk", "javac"),
+        // ---- more build tools ----
+        preset("Android build tools only", "Just aapt2, d8, apksigner and zip, with Termux's android.jar (lighter than the full SDK)",
             "pkg install -y openjdk-17 aapt aapt2 d8 apksigner zip && echo \"LOCATION=\$(find \$PREFIX -name android.jar 2>/dev/null | head -1)\"",
             null, "command -v aapt2 >/dev/null && command -v d8 >/dev/null && echo \"LOCATION=\$(find \$PREFIX -name android.jar 2>/dev/null | head -1)\"", null),
-        preset("Android SDK (command-line)", "sdkmanager, platform-tools, platform 35 and build-tools 35 (needs Java)", null,
-            "set -e; d=\$HOME/switchboard-tools/android-sdk; mkdir -p \$d/cmdline-tools; cd \$d; " +
-                "if [ ! -x cmdline-tools/latest/bin/sdkmanager ]; then curl -fLo clt.zip $SDK_URL; unzip -qo clt.zip -d cmdline-tools; rm -rf cmdline-tools/latest; mv cmdline-tools/cmdline-tools cmdline-tools/latest; rm -f clt.zip; fi; " +
-                "yes | cmdline-tools/latest/bin/sdkmanager --sdk_root=\$d 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' >/dev/null; echo \"LOCATION=\$d\"",
-            null, "d=\$HOME/switchboard-tools/android-sdk; [ -d \$d/platforms/android-35 ] && echo \"LOCATION=\$d\""),
-        pkg("C/C++ compiler", "clang/gcc, make", "clang make", "build-essential", "cc"),
+        pkg("Gradle", "Build tool for Android/Java/Kotlin projects", "gradle", "gradle", "gradle"),
+        pkg("Kotlin", "Kotlin compiler (kotlinc)", "kotlin", "kotlin", "kotlinc"),
+        pkg("C/C++ compiler", "clang/gcc and make", "clang make", "build-essential", "cc"),
+        pkg("CMake", "Cross-platform build system for C/C++", "cmake", "cmake", "cmake"),
         pkg("Go", "Go toolchain", "golang", "golang", "go"),
         pkg("Rust", "rustc and cargo", "rust", "rustc cargo", "cargo"),
+        // ---- everyday utilities ----
+        pkg("curl, wget, zip", "Downloading and archiving: curl, wget, zip, unzip", "curl wget zip unzip", "curl wget zip unzip", "wget"),
+        pkg("jq", "Read and transform JSON on the command line", "jq", "jq", "jq"),
+        pkg("OpenSSH", "ssh, scp and sftp for remote machines", "openssh", "openssh-client", "ssh"),
+        pkg("rsync", "Fast file sync and copy", "rsync", "rsync", "rsync"),
+        pkg("SQLite", "SQLite database shell", "sqlite", "sqlite3", "sqlite3"),
         pkg("FFmpeg", "Audio/video conversion", "ffmpeg", "ffmpeg", "ffmpeg"),
         pkg("ImageMagick", "Image conversion and editing", "imagemagick", "imagemagick", "magick"),
         pkg("Pandoc", "Document conversion (Markdown, Word, PDF, ...)", "pandoc", "pandoc", "pandoc"),
-        pkg("SQLite", "SQLite database shell", "sqlite", "sqlite3", "sqlite3"),
-        preset("esptool", "Flash ESP32/ESP8266 boards", "command -v pip >/dev/null || pkg install -y python; pip install esptool",
+        // ---- hardware and networks ----
+        pkg("Network tools", "nmap, netcat, dig, traceroute for finding and testing devices on your network",
+            "nmap netcat-openbsd dnsutils traceroute", "nmap netcat-openbsd dnsutils traceroute", "nmap"),
+        pkg("USB utilities", "lsusb and usb-devices for inspecting USB hardware", "usbutils", "usbutils", "lsusb"),
+        preset("Termux:API USB access", "termux-usb and libusb so programs in Termux can open USB devices (also install the Termux:API app from F-Droid)",
+            "pkg install -y termux-api libusb && echo \"LOCATION=\$(command -v termux-usb)\"", null,
+            "command -v termux-usb >/dev/null && echo \"LOCATION=\$(command -v termux-usb)\"", null),
+        preset("esptool", "Flash ESP32/ESP8266 boards", "command -v pip >/dev/null || pkg install -y python python-pip; pip install esptool",
             "python3 -m pip install --user esptool", "command -v esptool.py >/dev/null || command -v esptool >/dev/null", "python3 -m pip show esptool >/dev/null 2>&1"),
         preset("arduino-cli", "Compile and upload Arduino sketches",
             "pkg install -y curl; mkdir -p \$HOME/switchboard-tools/bin && curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=\$HOME/switchboard-tools/bin sh && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\"",
             "mkdir -p \$HOME/switchboard-tools/bin && curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=\$HOME/switchboard-tools/bin sh && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\"",
             "[ -x \$HOME/switchboard-tools/bin/arduino-cli ] && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\"",
             "[ -x \$HOME/switchboard-tools/bin/arduino-cli ] && echo \"LOCATION=\$HOME/switchboard-tools/bin/arduino-cli\""),
-        pkg("Android platform tools", "adb (incl. adb pair for Android 11+ wireless debugging) and fastboot", "android-tools", "adb fastboot", "adb"),
-        pkg("Network tools", "nmap, netcat, dig, traceroute for finding and testing devices on your network",
-            "nmap netcat-openbsd dnsutils traceroute", "nmap netcat-openbsd dnsutils traceroute", "nmap"),
-        preset("Termux:API USB access", "termux-usb and libusb so programs in Termux can open USB devices (also install the Termux:API app from F-Droid)",
-            "pkg install -y termux-api libusb && echo \"LOCATION=\$(command -v termux-usb)\"", null,
-            "command -v termux-usb >/dev/null && echo \"LOCATION=\$(command -v termux-usb)\"", null),
-        pkg("USB utilities", "lsusb and usb-devices for inspecting USB hardware", "usbutils", "usbutils", "lsusb"),
+        // ---- repositories ----
         ToolPackage(name = "rea (GitHub)", description = "smdc19812011/rea repository", kind = PackageKind.GIT, source = "https://github.com/smdc19812011/rea"),
-    ).filter { p -> mode == RunnerMode.PHONE && kindOf(p) in setOf(PackageKind.GIT, PackageKind.URL) || mode != RunnerMode.PHONE && installScript(p, mode) != null }
+    ) }
+
+    /** The one-tap developer set. */
+    val developerSet = listOf("Android SDK", "ADB & fastboot", "Node.js + npm", "Python 3 + pip", "Git", "Java (OpenJDK 17)")
+
+    /** Can this tool be installed on [mode]? (The phone sandbox only takes GitHub repos and downloads.) */
+    fun availableOn(p: ToolPackage, mode: RunnerMode): Boolean =
+        if (mode == RunnerMode.PHONE) kindOf(p) in setOf(PackageKind.GIT, PackageKind.URL) else installScript(p, mode) != null
+
+    /** Common tools that [mode] can install. */
+    fun presets(mode: RunnerMode): List<ToolPackage> = catalog.filter { availableOn(it, mode) }
 
     /** What the model is told: installed tools with their paths, and listed-but-missing ones. */
     fun note(packages: List<ToolPackage>, mode: RunnerMode): String {
